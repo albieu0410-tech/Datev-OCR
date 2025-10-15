@@ -62,6 +62,7 @@ DEFAULTS = {
     "streitwert_results_csv": "streitwert_results.csv",
     "doc_open_wait": 1.2,  # wait (s) after opening a doc
     "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
+    "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -513,6 +514,27 @@ class RDPApp(tk.Tk):
             command=self.pick_pdf_text_region,
         ).pack(side=tk.LEFT, padx=2)
 
+        cal3 = ttk.Frame(streit_frame)
+        cal3.pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            cal3,
+            text="Pick View Button",
+            command=self.pick_doc_view_point,
+        ).pack(side=tk.LEFT, padx=2)
+        view_pt = self.cfg.get("doc_view_point")
+        view_txt = (
+            f"{view_pt[0]:.3f}, {view_pt[1]:.3f}"
+            if isinstance(view_pt, (list, tuple)) and len(view_pt) == 2
+            else ""
+        )
+        self.doc_view_var = tk.StringVar(value=view_txt)
+        ttk.Entry(
+            cal3,
+            textvariable=self.doc_view_var,
+            width=20,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=4)
+
         ttk.Label(streit_frame, text="Include tokens (comma-separated)").pack(
             anchor="w", pady=(6, 0)
         )
@@ -864,6 +886,21 @@ class RDPApp(tk.Tk):
         self.cfg["pdf_search_point"] = rel
         self.log_print(f"PDF search point set: {rel}")
 
+    def pick_doc_view_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        x, y = self._prompt_and_capture_point(
+            "Pick",
+            "Hover the View button used to open documents, then confirm.",
+        )
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["doc_view_point"] = rel
+        self.doc_view_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
+        self.log_print(f"View button point set: {rel}")
+
     def pick_amount_region(self):
         """Pick a sub-region INSIDE the current Result Region; saves it into the profile editor fields."""
         if not self.current_rect:
@@ -1204,7 +1241,7 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
-    def _open_doclist_entry(self, match, doc_rect, focus_first=False):
+    def _select_doclist_entry(self, match, doc_rect, focus_first=False):
         if not match or not doc_rect:
             return False
         rx, ry, rw, rh = doc_rect
@@ -1217,8 +1254,25 @@ class RDPApp(tk.Tk):
         click_y = ry + match["y"] + max(10, match["h"] // 2)
         pyautogui.moveTo(click_x, click_y)
         pyautogui.click(click_x, click_y)
+        time.sleep(0.2)
+        return True
+
+    def _click_view_button(self, prefix=""):
+        if not self.current_rect:
+            return False
+        point = self.cfg.get("doc_view_point")
+        if not (isinstance(point, (list, tuple)) and len(point) == 2):
+            msg = "View button point is not configured. Please calibrate it."
+            self.log_print(f"{prefix}{msg}" if prefix else msg)
+            return False
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+        vx, vy = rel_to_abs(self.current_rect, point)
+        pyautogui.moveTo(vx, vy)
+        pyautogui.click(vx, vy)
         time.sleep(0.1)
-        pyautogui.doubleClick(click_x, click_y)
         return True
 
     def _type_doclist_query(self, query, press_enter=True):
@@ -1252,6 +1306,10 @@ class RDPApp(tk.Tk):
         time.sleep(0.2)
 
     def _process_open_pdf(self, term):
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
         sx, sy = rel_to_abs(self.current_rect, self.cfg["pdf_search_point"])
         pyautogui.click(sx, sy)
         pyautogui.hotkey("ctrl", "a")
@@ -1393,6 +1451,10 @@ class RDPApp(tk.Tk):
                     continue
                 time.sleep(list_wait)
 
+                rx, ry, rw, rh = doc_rect
+                pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+                time.sleep(0.2)
+
                 doc_img = _grab_region_color_generic(
                     self.current_rect,
                     self.cfg["doclist_region"],
@@ -1425,14 +1487,24 @@ class RDPApp(tk.Tk):
                     f"{m['token'] or 'any'} → {m['raw']}" for m in ordered[:3]
                 )
                 self.log_print(
-                    f"[{idx}/{total}] Opening {tag} match: {first['raw']} | candidates: {preview}"
+                    f"[{idx}/{total}] Selecting {tag} match: {first['raw']} | candidates: {preview}"
                 )
 
-                if not self._open_doclist_entry(first, doc_rect, focus_first=True):
+                if not self._select_doclist_entry(first, doc_rect, focus_first=True):
                     self.log_print(
                         f"[{idx}/{total}] Unable to activate doc row: {first.get('raw','')}"
                     )
                     continue
+
+                if not self._click_view_button(prefix=f"[{idx}/{total}] "):
+                    self.log_print(
+                        f"[{idx}/{total}] Skipping entry because the View button click failed."
+                    )
+                    continue
+
+                self.log_print(
+                    f"[{idx}/{total}] Clicked View button for the selected row."
+                )
 
                 time.sleep(doc_wait)
                 amount = self._process_open_pdf(term)
@@ -1480,11 +1552,9 @@ class RDPApp(tk.Tk):
                 return
 
             term = self.streitwort_var.get() or "Streitwert"
-            if not self._type_doclist_query(term):
-                self.log_print("[Test] Unable to type into doc list search.")
-                return
-
-            time.sleep(float(self.cfg.get("post_search_wait", 1.2)))
+            rx, ry, rw, rh = doc_rect
+            pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+            time.sleep(0.2)
 
             doc_img = _grab_region_color_generic(
                 self.current_rect,
@@ -1513,14 +1583,19 @@ class RDPApp(tk.Tk):
 
             first = ordered[0]
             tag = first.get("token") or "any"
-            if self._open_doclist_entry(first, doc_rect, focus_first=True):
+            if self._select_doclist_entry(first, doc_rect, focus_first=True):
                 self.log_print(
-                    f"[Test] Opened first matching row ({tag}): {first['raw']}"
+                    f"[Test] Selected first matching row ({tag}): {first['raw']}"
                 )
             else:
-                self.log_print("[Test] Failed to open the first matching row.")
+                self.log_print("[Test] Failed to select the first matching row.")
                 return
 
+            if not self._click_view_button(prefix="[Test] "):
+                self.log_print("[Test] Unable to click the View button.")
+                return
+
+            self.log_print("[Test] Clicked View button to open the PDF.")
             time.sleep(float(self.docwait_var.get() or 1.2))
             amount = self._process_open_pdf(term)
             self.log_print(
@@ -1639,6 +1714,11 @@ class RDPApp(tk.Tk):
                     "streitwert_results_csv", "streitwert_results.csv"
                 )
             )
+            view_pt = self.cfg.get("doc_view_point")
+            if isinstance(view_pt, (list, tuple)) and len(view_pt) == 2:
+                self.doc_view_var.set(f"{view_pt[0]:.3f}, {view_pt[1]:.3f}")
+            else:
+                self.doc_view_var.set("")
 
             # Profiles UI
             self.profile_names = [
