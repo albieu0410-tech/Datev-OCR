@@ -210,23 +210,41 @@ def extract_amount_from_text(text: str):
     return m.group(0) if m else None
 
 
-def lines_from_tsv(tsv_df):
+def lines_from_tsv(tsv_df, scale=1):
     """
     From pytesseract data -> [(x,y,w,h,text), ...] top-to-bottom, left-to-right.
+    Coordinates are normalised by the supplied scale factor (if any).
     """
     if tsv_df is None or tsv_df.empty:
         return []
     df = tsv_df.dropna(subset=["text"])
     df = df[df["conf"] > -1]
+    try:
+        scale_val = float(scale)
+    except Exception:
+        scale_val = 1.0
+    scale_val = max(scale_val, 1.0)
     lines = []
     for (_, _, _), grp in df.groupby(["block_num", "par_num", "line_num"]):
-        ys = grp["top"].min()
-        xs = grp["left"].min()
-        w = (grp["left"] + grp["width"]).max() - xs
-        h = (grp["top"] + grp["height"]).max() - ys
+        lefts = grp["left"]
+        rights = grp["left"] + grp["width"]
+        tops = grp["top"]
+        bottoms = grp["top"] + grp["height"]
+        xs = min(lefts) / scale_val
+        ys = min(tops) / scale_val
+        w = (max(rights) - min(lefts)) / scale_val
+        h = (max(bottoms) - min(tops)) / scale_val
         txt = " ".join(str(t) for t in grp["text"] if str(t).strip())
         if txt.strip():
-            lines.append((int(xs), int(ys), int(w), int(h), txt.strip()))
+            lines.append(
+                (
+                    int(round(xs)),
+                    int(round(ys)),
+                    int(round(w)),
+                    int(round(h)),
+                    txt.strip(),
+                )
+            )
     lines.sort(key=lambda x: (x[1], x[0]))
     return lines
 
@@ -239,7 +257,7 @@ def _grab_region_color_generic(current_rect, rel_box, upscale):
     except Exception:
         scale_val = 3
     scale = max(1, scale_val)
-    return upscale_pil(img, scale=scale)
+    return upscale_pil(img, scale=scale), scale
 
 
 # ---------- Normalization / parsing ----------
@@ -1254,10 +1272,16 @@ class RDPApp(tk.Tk):
             )
             pyautogui.click(focus_x, focus_y)
             time.sleep(0.2)
-        cx_offset = match["w"] // 2 if match["w"] else 15
-        cx_offset = max(12, min(cx_offset, 60))
-        click_x = rx + match["x"] + cx_offset
-        click_y = ry + match["y"] + max(10, match["h"] // 2)
+        local_x = match["x"] + max(
+            12, min(match["w"] // 2 if match["w"] else 20, max(match["w"] - 10, 12))
+        )
+        local_y = match["y"] + max(
+            10, min(match["h"] // 2 if match["h"] else 20, max(match["h"] - 10, 10))
+        )
+        local_x = max(5, local_x)
+        local_y = max(5, local_y)
+        click_x = rx + min(local_x, max(rw - 5, 5))
+        click_y = ry + min(local_y, max(rh - 5, 5))
         self.log_print(
             f"{prefix}Moving to row '{match['raw']}' at ({click_x}, {click_y}) size ({match['w']}x{match['h']})."
         )
@@ -1321,24 +1345,13 @@ class RDPApp(tk.Tk):
         pyautogui.hotkey("ctrl", "f4")
         time.sleep(0.2)
 
-    def _process_open_pdf(self, term, prefix=""):
+    def _process_open_pdf(self, prefix=""):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
             pass
-        sx, sy = rel_to_abs(self.current_rect, self.cfg["pdf_search_point"])
-        self.log_print(
-            f"{prefix}Focusing PDF search at ({sx}, {sy}) and typing '{term}'."
-        )
-        pyautogui.click(sx, sy)
-        pyautogui.hotkey("ctrl", "a")
-        pyautogui.press("backspace")
-        pyautogui.typewrite(term, interval=float(self.type_var.get() or 0.02))
-        self.log_print(f"{prefix}Initiating PDF search (Enter).")
-        pyautogui.press("enter")
-        time.sleep(float(self.hitwait_var.get() or 1.0))
 
-        hits_img = _grab_region_color_generic(
+        hits_img, hits_scale = _grab_region_color_generic(
             self.current_rect,
             self.cfg["pdf_hits_region"],
             self.upscale_var.get(),
@@ -1346,38 +1359,36 @@ class RDPApp(tk.Tk):
         dfh = do_ocr_data(
             hits_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
         )
-        hits = lines_from_tsv(dfh)
+        hits = lines_from_tsv(dfh, scale=hits_scale)
         self.log_print(f"{prefix}PDF hits OCR rows: {len(hits)}.")
+
         if hits:
-            target = None
-            for xh, yh, wh, hh, t in hits:
-                if term.lower() in (t or "").lower():
-                    target = (xh, yh, wh, hh, t)
-                    break
-            if target is None:
-                target = hits[0]
-            xh, yh, wh, hh, _ = target
-            rxh, ryh, _, _ = rel_to_abs(
+            xh, yh, wh, hh, text = hits[0]
+            rxh, ryh, rw, rh = rel_to_abs(
                 self.current_rect, self.cfg["pdf_hits_region"]
             )
-            hx_abs = rxh + max(10, xh + 10)
-            hy_abs = ryh + yh + hh // 2
+
+            local_x = xh + max(10, min(wh // 2, max(wh - 10, 10)))
+            local_y = yh + max(10, min(hh // 2, max(hh - 10, 10)))
+            click_x = rxh + min(max(5, local_x), max(rw - 5, 5))
+            click_y = ryh + min(max(5, local_y), max(rh - 5, 5))
             self.log_print(
-                f"{prefix}Clicking PDF hit at ({hx_abs}, {hy_abs}) text: {target[4]}."
+                f"{prefix}Clicking first PDF hit at ({click_x}, {click_y}) text: {text}."
             )
-            pyautogui.click(hx_abs, hy_abs)
+            pyautogui.moveTo(click_x, click_y)
+            pyautogui.click(click_x, click_y)
             time.sleep(float(self.hitwait_var.get() or 1.0))
         else:
             rxh, ryh, _, _ = rel_to_abs(
                 self.current_rect, self.cfg["pdf_hits_region"]
             )
             self.log_print(
-                f"{prefix}No PDF hits OCR rows detected; clicking default position."
+                f"{prefix}No PDF hits detected; clicking default position to focus pane."
             )
             pyautogui.click(rxh + 20, ryh + 30)
             time.sleep(float(self.hitwait_var.get() or 1.0))
 
-        page_img = _grab_region_color_generic(
+        page_img, page_scale = _grab_region_color_generic(
             self.current_rect,
             self.cfg["pdf_text_region"],
             self.upscale_var.get(),
@@ -1385,7 +1396,7 @@ class RDPApp(tk.Tk):
         dft = do_ocr_data(
             page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
         )
-        lines_pg = lines_from_tsv(dft)
+        lines_pg = lines_from_tsv(dft, scale=page_scale)
         self.log_print(
             f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
         )
@@ -1466,8 +1477,6 @@ class RDPApp(tk.Tk):
 
             list_wait = float(self.cfg.get("post_search_wait", 1.2))
             doc_wait = float(self.docwait_var.get() or 1.2)
-            term = self.streitwort_var.get() or "Streitwert"
-
             results = []
             total = len(queries)
             for idx, (aktenzeichen, _row) in enumerate(queries, 1):
@@ -1492,7 +1501,7 @@ class RDPApp(tk.Tk):
                 pyautogui.click(focus_x, focus_y)
                 time.sleep(0.2)
 
-                doc_img = _grab_region_color_generic(
+                doc_img, doc_scale = _grab_region_color_generic(
                     self.current_rect,
                     self.cfg["doclist_region"],
                     self.upscale_var.get(),
@@ -1502,7 +1511,7 @@ class RDPApp(tk.Tk):
                     lang=self.lang_var.get().strip() or "deu+eng",
                     psm=6,
                 )
-                lines = lines_from_tsv(df)
+                lines = lines_from_tsv(df, scale=doc_scale)
                 matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
                 ordered = self._prioritize_streitwert_matches(matches, inc)
 
@@ -1549,7 +1558,7 @@ class RDPApp(tk.Tk):
                 )
 
                 time.sleep(doc_wait)
-                amount = self._process_open_pdf(term, prefix=f"[{idx}/{total}] ")
+                amount = self._process_open_pdf(prefix=f"[{idx}/{total}] ")
                 results.append(
                     {
                         "aktenzeichen": aktenzeichen,
@@ -1610,7 +1619,7 @@ class RDPApp(tk.Tk):
             pyautogui.click(focus_x, focus_y)
             time.sleep(0.2)
 
-            doc_img = _grab_region_color_generic(
+            doc_img, doc_scale = _grab_region_color_generic(
                 self.current_rect,
                 self.cfg["doclist_region"],
                 self.upscale_var.get(),
@@ -1620,7 +1629,7 @@ class RDPApp(tk.Tk):
                 lang=self.lang_var.get().strip() or "deu+eng",
                 psm=6,
             )
-            lines = lines_from_tsv(df)
+            lines = lines_from_tsv(df, scale=doc_scale)
             matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
             ordered = self._prioritize_streitwert_matches(matches, inc)
 
@@ -1653,7 +1662,7 @@ class RDPApp(tk.Tk):
 
             self.log_print("[Test] Clicked View button to open the PDF.")
             time.sleep(float(self.docwait_var.get() or 1.2))
-            amount = self._process_open_pdf(term, prefix="[Test] ")
+            amount = self._process_open_pdf(prefix="[Test] ")
             self.log_print(
                 f"[Test] Extracted Streitwert amount: {amount or '(none)'}"
             )
