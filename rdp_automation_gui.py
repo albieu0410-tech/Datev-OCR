@@ -1378,6 +1378,31 @@ class RDPApp(tk.Tk):
         time.sleep(0.1)
         return True
 
+    def _type_pdf_search(self, query, prefix="", press_enter=True):
+        if not self.current_rect:
+            return False
+        point = self.cfg.get("pdf_search_point")
+        if not (isinstance(point, (list, tuple)) and len(point) == 2):
+            msg = "PDF search point is not configured. Please calibrate it."
+            self.log_print(f"{prefix}{msg}" if prefix else msg)
+            return False
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+        sx, sy = rel_to_abs(self.current_rect, point)
+        self.log_print(
+            f"{prefix}Clicking PDF search box at ({sx}, {sy}) and typing '{query}'."
+        )
+        pyautogui.click(sx, sy)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.press("backspace")
+        pyautogui.typewrite(query or "", interval=float(self.type_var.get() or 0.02))
+        if press_enter:
+            self.log_print(f"{prefix}Pressing Enter to run PDF search.")
+            pyautogui.press("enter")
+        return True
+
     def _click_pdf_result_button(self, prefix=""):
         if not self.current_rect:
             return False
@@ -1457,11 +1482,19 @@ class RDPApp(tk.Tk):
         pyautogui.hotkey("ctrl", "f4")
         time.sleep(0.2)
 
-    def _process_open_pdf(self, prefix=""):
+    def _process_open_pdf(self, prefix="", search_term=None):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
             pass
+
+        if search_term:
+            if not self._type_pdf_search(search_term, prefix=prefix):
+                self.log_print(
+                    f"{prefix}Unable to type PDF search term; continuing without re-search."
+                )
+            else:
+                time.sleep(float(self.hitwait_var.get() or 1.0))
 
         if not self._click_pdf_result_button(prefix=prefix):
             self.log_print(
@@ -1574,17 +1607,6 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] Typed '{aktenzeichen}' into the document search box."
                 )
 
-                term = self.streitwort_var.get().strip() or "Streitwert"
-                if not self._type_doclist_query(term, prefix=f"[{idx}/{total}] "):
-                    self.log_print(
-                        f"[{idx}/{total}] Unable to type the Streitwert search term. Skipping entry."
-                    )
-                    continue
-                self.log_print(
-                    f"[{idx}/{total}] Typed '{term}' into the document search box."
-                )
-                time.sleep(list_wait)
-
                 rx, ry, rw, rh = doc_rect
                 focus_x = rx + max(5, rw // 40)
                 focus_y = ry + max(5, rh // 40)
@@ -1651,7 +1673,10 @@ class RDPApp(tk.Tk):
                 )
 
                 time.sleep(doc_wait)
-                amount = self._process_open_pdf(prefix=f"[{idx}/{total}] ")
+                term = self.streitwort_var.get().strip() or "Streitwert"
+                amount = self._process_open_pdf(
+                    prefix=f"[{idx}/{total}] ", search_term=term
+                )
                 results.append(
                     {
                         "aktenzeichen": aktenzeichen,
@@ -1755,7 +1780,9 @@ class RDPApp(tk.Tk):
 
             self.log_print("[Test] Clicked View button to open the PDF.")
             time.sleep(float(self.docwait_var.get() or 1.2))
-            amount = self._process_open_pdf(prefix="[Test] ")
+            amount = self._process_open_pdf(
+                prefix="[Test] ", search_term=term or "Streitwert"
+            )
             self.log_print(
                 f"[Test] Extracted Streitwert amount: {amount or '(none)'}"
             )
