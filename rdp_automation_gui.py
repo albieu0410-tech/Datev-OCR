@@ -2,7 +2,7 @@ import os, io, json, time, threading, re
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
-from PIL import Image, ImageTk, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageTk, ImageFilter, ImageOps, ImageStat, ImageDraw
 import pandas as pd
 import pyautogui
 from pywinauto import Desktop
@@ -350,6 +350,10 @@ class RDPApp(tk.Tk):
         self.ocr_preview_imgtk = None
         self._current_profile_sub_region = None
         self.capture_countdown_seconds = 3
+        self.live_preview_window = None
+        self.live_preview_label = None
+        self.live_preview_imgtk = None
+        self.live_preview_running = False
 
         self.create_widgets()
 
@@ -739,6 +743,9 @@ class RDPApp(tk.Tk):
         ttk.Label(right, text="OCR Preview (color crop)").pack(anchor="w")
         self.img_label = ttk.Label(right)
         self.img_label.pack(anchor="w", pady=(0, 6))
+        ttk.Button(
+            right, text="Toggle Live Preview", command=self.toggle_live_preview
+        ).pack(anchor="w", pady=(0, 6))
         ttk.Label(right, text="Log").pack(anchor="w")
         log_frame = ttk.Frame(right)
         log_frame.pack(fill=tk.BOTH, expand=True)
@@ -1682,6 +1689,93 @@ class RDPApp(tk.Tk):
         preview.thumbnail((720, 240))
         self.ocr_preview_imgtk = ImageTk.PhotoImage(preview)
         self.img_label.configure(image=self.ocr_preview_imgtk)
+
+    # ---------- Live preview (cursor tracking) ----------
+    def toggle_live_preview(self):
+        if self.live_preview_running:
+            self.stop_live_preview()
+        else:
+            self.start_live_preview()
+
+    def start_live_preview(self):
+        if self.live_preview_running:
+            return
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                self.log_print("Cannot start live preview without RDP connection.")
+                return
+        try:
+            win = tk.Toplevel(self)
+        except tk.TclError:
+            self.log_print("Cannot open live preview window (no display available).")
+            return
+
+        win.title("Live Cursor Preview")
+        win.geometry("640x360")
+        win.attributes("-topmost", True)
+        lbl = ttk.Label(win)
+        lbl.pack(fill=tk.BOTH, expand=True)
+        self.live_preview_window = win
+        self.live_preview_label = lbl
+        self.live_preview_running = True
+        win.protocol("WM_DELETE_WINDOW", self.stop_live_preview)
+        self._refresh_live_preview()
+        self.log_print("Live preview started.")
+
+    def stop_live_preview(self):
+        was_running = self.live_preview_running
+        self.live_preview_running = False
+        if self.live_preview_window is not None:
+            try:
+                self.live_preview_window.destroy()
+            except tk.TclError:
+                pass
+        self.live_preview_window = None
+        self.live_preview_label = None
+        self.live_preview_imgtk = None
+        if was_running:
+            self.log_print("Live preview stopped.")
+
+    def _refresh_live_preview(self):
+        if not self.live_preview_running:
+            return
+        if not self.live_preview_window or not self.live_preview_label:
+            self.stop_live_preview()
+            return
+        rect = self.current_rect
+        if not rect:
+            self.stop_live_preview()
+            return
+        left, top, right, bottom = rect
+        width, height = right - left, bottom - top
+        try:
+            img = grab_xywh(left, top, width, height)
+        except Exception as exc:
+            self.log_print(f"Live preview capture failed: {exc}")
+            self.stop_live_preview()
+            return
+
+        try:
+            cx, cy = pyautogui.position()
+        except Exception:
+            cx = cy = None
+
+        draw = ImageDraw.Draw(img)
+        if cx is not None and left <= cx <= right and top <= cy <= bottom:
+            rel_x = cx - left
+            rel_y = cy - top
+            draw.line([(rel_x - 12, rel_y), (rel_x + 12, rel_y)], fill="red", width=2)
+            draw.line([(rel_x, rel_y - 12), (rel_x, rel_y + 12)], fill="red", width=2)
+        draw.rectangle([(0, 0), (width - 1, height - 1)], outline="yellow", width=2)
+
+        display = img.copy()
+        display.thumbnail((640, 360))
+        self.live_preview_imgtk = ImageTk.PhotoImage(display)
+        if self.live_preview_label:
+            self.live_preview_label.configure(image=self.live_preview_imgtk)
+        if self.live_preview_window:
+            self.live_preview_window.after(200, self._refresh_live_preview)
 
     def log_print(self, text):
         self.log.insert(tk.END, str(text) + "\n")
