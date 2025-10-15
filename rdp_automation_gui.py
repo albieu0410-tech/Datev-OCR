@@ -230,6 +230,10 @@ DOC_LOADING_PATTERNS = (
     "suche lauft",
     "suche laeuft",
     "suche lauf",
+    "daten werden geladen",
+    "daten werden gel",
+    "datei wird geladen",
+    "datei wird gel",
 )
 
 
@@ -1531,6 +1535,43 @@ class RDPApp(tk.Tk):
                 return
             time.sleep(0.4)
 
+    def _wait_for_pdf_ready(self, prefix="", timeout=12.0, reason=""):
+        if not self.current_rect or "pdf_text_region" not in self.cfg:
+            return
+        suffix = f" ({reason})" if reason else ""
+        start = time.time()
+        notified = False
+        while True:
+            try:
+                page_img, page_scale = _grab_region_color_generic(
+                    self.current_rect,
+                    self.cfg["pdf_text_region"],
+                    self.upscale_var.get(),
+                )
+            except Exception:
+                return
+            df = do_ocr_data(
+                page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+            )
+            lines = lines_from_tsv(df, scale=page_scale)
+            overlay = self._find_doclist_overlay_text(lines)
+            if not overlay:
+                if notified:
+                    self.log_print(f"{prefix}PDF overlay cleared{suffix}.")
+                return
+            if not notified:
+                desc = normalize_line(overlay) or overlay
+                self.log_print(
+                    f"{prefix}PDF overlay detected{suffix}: '{desc}'. Waiting..."
+                )
+            notified = True
+            if time.time() - start > timeout:
+                self.log_print(
+                    f"{prefix}Timeout waiting for PDF overlay to clear{suffix}. Continuing."
+                )
+                return
+            time.sleep(0.4)
+
     def _type_pdf_search(self, query, prefix="", press_enter=True):
         if not self.current_rect:
             return False
@@ -1643,6 +1684,8 @@ class RDPApp(tk.Tk):
         except Exception:
             pass
 
+        self._wait_for_pdf_ready(prefix=prefix, reason="after opening PDF")
+
         term = search_term
         if term is None:
             term = self.streitwort_var.get().strip() or "Streitwert"
@@ -1656,11 +1699,17 @@ class RDPApp(tk.Tk):
                 wait_seconds = float(self.hitwait_var.get() or 1.0)
                 if wait_seconds > 0 and not self._should_skip_manual_waits():
                     time.sleep(wait_seconds)
+                self._wait_for_pdf_ready(prefix=prefix, reason="after PDF search")
 
-        if not self._click_pdf_result_button(prefix=prefix):
+        clicked_hits = self._click_pdf_result_button(prefix=prefix)
+        if not clicked_hits:
             self.log_print(
                 f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
             )
+
+        reason = "after PDF results click" if clicked_hits else "before page OCR"
+        self._wait_for_pdf_ready(prefix=prefix, reason=reason)
+
         page_img, page_scale = _grab_region_color_generic(
             self.current_rect,
             self.cfg["pdf_text_region"],
