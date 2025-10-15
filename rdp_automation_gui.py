@@ -1241,20 +1241,30 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
-    def _select_doclist_entry(self, match, doc_rect, focus_first=False):
+    def _select_doclist_entry(self, match, doc_rect, focus_first=False, prefix=""):
         if not match or not doc_rect:
+            self.log_print(f"{prefix}No match/doc_rect provided for selection.")
             return False
         rx, ry, rw, rh = doc_rect
         if focus_first:
-            pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+            focus_x = rx + max(5, rw // 40)
+            focus_y = ry + max(5, rh // 40)
+            self.log_print(
+                f"{prefix}Focusing doc list at ({focus_x}, {focus_y})."
+            )
+            pyautogui.click(focus_x, focus_y)
             time.sleep(0.2)
         cx_offset = match["w"] // 2 if match["w"] else 15
         cx_offset = max(12, min(cx_offset, 60))
         click_x = rx + match["x"] + cx_offset
         click_y = ry + match["y"] + max(10, match["h"] // 2)
+        self.log_print(
+            f"{prefix}Moving to row '{match['raw']}' at ({click_x}, {click_y}) size ({match['w']}x{match['h']})."
+        )
         pyautogui.moveTo(click_x, click_y)
         pyautogui.click(click_x, click_y)
         time.sleep(0.2)
+        self.log_print(f"{prefix}Clicked row '{match['raw']}'.")
         return True
 
     def _click_view_button(self, prefix=""):
@@ -1270,12 +1280,13 @@ class RDPApp(tk.Tk):
         except Exception:
             pass
         vx, vy = rel_to_abs(self.current_rect, point)
+        self.log_print(f"{prefix}Clicking View button at ({vx}, {vy}).")
         pyautogui.moveTo(vx, vy)
         pyautogui.click(vx, vy)
         time.sleep(0.1)
         return True
 
-    def _type_doclist_query(self, query, press_enter=True):
+    def _type_doclist_query(self, query, press_enter=True, prefix=""):
         if not self.current_rect:
             return False
         try:
@@ -1287,34 +1298,43 @@ class RDPApp(tk.Tk):
             return False
 
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        self.log_print(
+            f"{prefix}Clicking search box at ({sx}, {sy}) and typing '{query}'."
+        )
         pyautogui.click(sx, sy)
         pyautogui.hotkey("ctrl", "a")
         pyautogui.press("backspace")
         pyautogui.typewrite(query or "", interval=float(self.type_var.get() or 0.02))
         if press_enter:
+            self.log_print(f"{prefix}Pressing Enter after typing query.")
             pyautogui.press("enter")
         return True
 
-    def _close_active_pdf(self):
+    def _close_active_pdf(self, prefix=""):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
             return
+        self.log_print(f"{prefix}Closing active PDF window (Ctrl+W, Ctrl+F4).")
         pyautogui.hotkey("ctrl", "w")
         time.sleep(0.4)
         pyautogui.hotkey("ctrl", "f4")
         time.sleep(0.2)
 
-    def _process_open_pdf(self, term):
+    def _process_open_pdf(self, term, prefix=""):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
             pass
         sx, sy = rel_to_abs(self.current_rect, self.cfg["pdf_search_point"])
+        self.log_print(
+            f"{prefix}Focusing PDF search at ({sx}, {sy}) and typing '{term}'."
+        )
         pyautogui.click(sx, sy)
         pyautogui.hotkey("ctrl", "a")
         pyautogui.press("backspace")
         pyautogui.typewrite(term, interval=float(self.type_var.get() or 0.02))
+        self.log_print(f"{prefix}Initiating PDF search (Enter).")
         pyautogui.press("enter")
         time.sleep(float(self.hitwait_var.get() or 1.0))
 
@@ -1327,6 +1347,7 @@ class RDPApp(tk.Tk):
             hits_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
         )
         hits = lines_from_tsv(dfh)
+        self.log_print(f"{prefix}PDF hits OCR rows: {len(hits)}.")
         if hits:
             target = None
             for xh, yh, wh, hh, t in hits:
@@ -1341,11 +1362,17 @@ class RDPApp(tk.Tk):
             )
             hx_abs = rxh + max(10, xh + 10)
             hy_abs = ryh + yh + hh // 2
+            self.log_print(
+                f"{prefix}Clicking PDF hit at ({hx_abs}, {hy_abs}) text: {target[4]}."
+            )
             pyautogui.click(hx_abs, hy_abs)
             time.sleep(float(self.hitwait_var.get() or 1.0))
         else:
             rxh, ryh, _, _ = rel_to_abs(
                 self.current_rect, self.cfg["pdf_hits_region"]
+            )
+            self.log_print(
+                f"{prefix}No PDF hits OCR rows detected; clicking default position."
             )
             pyautogui.click(rxh + 20, ryh + 30)
             time.sleep(float(self.hitwait_var.get() or 1.0))
@@ -1359,6 +1386,9 @@ class RDPApp(tk.Tk):
             page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
         )
         lines_pg = lines_from_tsv(dft)
+        self.log_print(
+            f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
+        )
         combined = "\n".join(normalize_line(t) for _, _, _, _, t in lines_pg)
         return extract_amount_from_text(combined)
 
@@ -1444,7 +1474,9 @@ class RDPApp(tk.Tk):
                 self.log_print(
                     f"[{idx}/{total}] Searching doc list for Aktenzeichen: {aktenzeichen}"
                 )
-                if not self._type_doclist_query(aktenzeichen):
+                if not self._type_doclist_query(
+                    aktenzeichen, prefix=f"[{idx}/{total}] "
+                ):
                     self.log_print(
                         f"[{idx}/{total}] Unable to type Aktenzeichen. Skipping entry."
                     )
@@ -1452,7 +1484,12 @@ class RDPApp(tk.Tk):
                 time.sleep(list_wait)
 
                 rx, ry, rw, rh = doc_rect
-                pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+                focus_x = rx + max(5, rw // 40)
+                focus_y = ry + max(5, rh // 40)
+                self.log_print(
+                    f"[{idx}/{total}] Clicking doc list to ensure focus at ({focus_x}, {focus_y})."
+                )
+                pyautogui.click(focus_x, focus_y)
                 time.sleep(0.2)
 
                 doc_img = _grab_region_color_generic(
@@ -1490,7 +1527,12 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] Selecting {tag} match: {first['raw']} | candidates: {preview}"
                 )
 
-                if not self._select_doclist_entry(first, doc_rect, focus_first=True):
+                if not self._select_doclist_entry(
+                    first,
+                    doc_rect,
+                    focus_first=True,
+                    prefix=f"[{idx}/{total}] ",
+                ):
                     self.log_print(
                         f"[{idx}/{total}] Unable to activate doc row: {first.get('raw','')}"
                     )
@@ -1507,7 +1549,7 @@ class RDPApp(tk.Tk):
                 )
 
                 time.sleep(doc_wait)
-                amount = self._process_open_pdf(term)
+                amount = self._process_open_pdf(term, prefix=f"[{idx}/{total}] ")
                 results.append(
                     {
                         "aktenzeichen": aktenzeichen,
@@ -1519,7 +1561,7 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] {aktenzeichen} / {first['norm']} → {amount or '(none)'}"
                 )
 
-                self._close_active_pdf()
+                self._close_active_pdf(prefix=f"[{idx}/{total}] ")
                 time.sleep(0.5)
 
             if results:
@@ -1553,14 +1595,19 @@ class RDPApp(tk.Tk):
 
             term = self.streitwort_var.get() or "Streitwert"
             list_wait = float(self.cfg.get("post_search_wait", 1.2))
-            if not self._type_doclist_query(term):
+            if not self._type_doclist_query(term, prefix="[Test] "):
                 self.log_print("[Test] Unable to type the Streitwert search term.")
                 return
             self.log_print(f"[Test] Typed '{term}' into the document search box.")
             time.sleep(list_wait)
 
             rx, ry, rw, rh = doc_rect
-            pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+            focus_x = rx + max(5, rw // 40)
+            focus_y = ry + max(5, rh // 40)
+            self.log_print(
+                f"[Test] Clicking doc list to ensure focus at ({focus_x}, {focus_y})."
+            )
+            pyautogui.click(focus_x, focus_y)
             time.sleep(0.2)
 
             doc_img = _grab_region_color_generic(
@@ -1590,7 +1637,9 @@ class RDPApp(tk.Tk):
 
             first = ordered[0]
             tag = first.get("token") or "any"
-            if self._select_doclist_entry(first, doc_rect, focus_first=True):
+            if self._select_doclist_entry(
+                first, doc_rect, focus_first=True, prefix="[Test] "
+            ):
                 self.log_print(
                     f"[Test] Selected first matching row ({tag}): {first['raw']}"
                 )
@@ -1604,12 +1653,12 @@ class RDPApp(tk.Tk):
 
             self.log_print("[Test] Clicked View button to open the PDF.")
             time.sleep(float(self.docwait_var.get() or 1.2))
-            amount = self._process_open_pdf(term)
+            amount = self._process_open_pdf(term, prefix="[Test] ")
             self.log_print(
                 f"[Test] Extracted Streitwert amount: {amount or '(none)'}"
             )
 
-            self._close_active_pdf()
+            self._close_active_pdf(prefix="[Test] ")
             time.sleep(0.5)
             self.log_print("[Test] Closed PDF after verification.")
 
