@@ -1488,8 +1488,12 @@ class RDPApp(tk.Tk):
         except Exception:
             pass
 
-        if search_term:
-            if not self._type_pdf_search(search_term, prefix=prefix):
+        term = search_term
+        if term is None:
+            term = self.streitwort_var.get().strip() or "Streitwert"
+
+        if term:
+            if not self._type_pdf_search(term, prefix=prefix):
                 self.log_print(
                     f"{prefix}Unable to type PDF search term; continuing without re-search."
                 )
@@ -1673,10 +1677,7 @@ class RDPApp(tk.Tk):
                 )
 
                 time.sleep(doc_wait)
-                term = self.streitwort_var.get().strip() or "Streitwert"
-                amount = self._process_open_pdf(
-                    prefix=f"[{idx}/{total}] ", search_term=term
-                )
+                amount = self._process_open_pdf(prefix=f"[{idx}/{total}] ")
                 results.append(
                     {
                         "aktenzeichen": aktenzeichen,
