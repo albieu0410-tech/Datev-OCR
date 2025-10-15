@@ -1482,7 +1482,7 @@ class RDPApp(tk.Tk):
         pyautogui.hotkey("ctrl", "f4")
         time.sleep(0.2)
 
-    def _process_open_pdf(self, prefix="", search_term=None):
+    def _process_open_pdf(self, prefix="", search_term=None, retype=False):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
@@ -1492,7 +1492,7 @@ class RDPApp(tk.Tk):
         if term is None:
             term = self.streitwort_var.get().strip() or "Streitwert"
 
-        if term:
+        if retype and term:
             if not self._type_pdf_search(term, prefix=prefix):
                 self.log_print(
                     f"{prefix}Unable to type PDF search term; continuing without re-search."
