@@ -1,0 +1,47 @@
+{
+  "rdp_title_regex": ".* - Remote Desktop Connection",
+  "excel_path": "C:/Users/salbahaca/Downloads/S_Cases_VGL AG zur Bearbeitung.xlsx",
+  "excel_sheet": "Tabelle1",
+  "input_column": "aktenzeichen",
+  "results_csv": "rdp_results.csv",
+  "tesseract_path": "C:/Users/salbahaca/AppData/Local/Programs/Tesseract-OCR/tesseract.exe",
+  "tesseract_lang": "deu+eng",
+  "type_delay": 0.02,
+  "post_search_wait": 5.5,
+  "search_point": [
+    0.2972689075630252,
+    0.17926356589147288
+  ],
+  "result_region": [
+    0.7783613445378151,
+    0.2810077519379845,
+    0.2027310924369748,
+    0.03488372093023256
+  ],
+  "start_cell": "B364",
+  "max_rows": 0,
+  "line_band_px": 40,
+  "picked_line_rel_y": null,
+  "typing_test_text": "TEST123",
+  "line_offset_px": 0,
+  "upscale_x": 4,
+  "color_ocr": true,
+  "auto_green": true,
+  "use_full_region_parse": true,
+  "keyword": "Honorar",
+  "normalize_ocr": true,
+  "amount_profiles": [
+    {
+      "name": "Rechnungen",
+      "keyword": "",
+      "sub_region": [
+        0.0,
+        1.1875,
+        1.0,
+        0.0125
+      ]
+    }
+  ],
+  "active_amount_profile": "Rechnungen",
+  "use_amount_profile": false
+}
