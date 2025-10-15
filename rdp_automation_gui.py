@@ -62,6 +62,7 @@ DEFAULTS = {
     "streitwert_results_csv": "streitwert_results.csv",
     "doc_open_wait": 1.2,  # wait (s) after opening a doc
     "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
+    "pdf_view_extra_wait": 2.0,  # wait (s) after pressing the PDF results button
     "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
     "pdf_close_point": [0.97, 0.05],  # close button for the PDF viewer window
     "streitwert_overlay_skip_waits": False,  # rely solely on overlay detection delays
@@ -234,6 +235,17 @@ DOC_LOADING_PATTERNS = (
     "daten werden gel",
     "datei wird geladen",
     "datei wird gel",
+    "bitte warten",
+    "bitte warte",
+    "wird geladen",
+    "wird gelad",
+    "wird geoffnet",
+    "wird geöffnet",
+    "werden vorbereitet",
+    "wird vorbereitet",
+    "lade daten",
+    "lade datei",
+    "laden",
 )
 
 
@@ -682,6 +694,16 @@ class RDPApp(tk.Tk):
             text="Only wait for loading overlays (ignore manual delays)",
             variable=self.skip_waits_var,
         ).pack(anchor="w", pady=(6, 0))
+
+        wait_row = ttk.Frame(streit_frame)
+        wait_row.pack(anchor="w", pady=(2, 0))
+        ttk.Label(wait_row, text="PDF view wait (s)").pack(side=tk.LEFT)
+        self.pdf_view_wait_var = tk.StringVar(
+            value=str(self.cfg.get("pdf_view_extra_wait", 2.0))
+        )
+        ttk.Entry(wait_row, textvariable=self.pdf_view_wait_var, width=6).pack(
+            side=tk.LEFT, padx=6
+        )
 
         ttk.Label(streit_frame, text="Streitwert CSV").pack(anchor="w", pady=(6, 0))
         self.streit_csv_var = tk.StringVar(
@@ -1435,18 +1457,65 @@ class RDPApp(tk.Tk):
         time.sleep(0.1)
         return True
 
-    def _find_doclist_overlay_text(self, lines):
-        for _, _, _, _, raw in lines:
-            norm = normalize_line(raw)
-            if not norm:
+    def _find_overlay_entry(self, lines):
+        for x, y, w, h, raw in lines:
+            if raw is None:
                 continue
-            lower = norm.lower()
-            ascii_lower = unicodedata.normalize("NFKD", lower).encode("ascii", "ignore").decode("ascii")
-            for candidate in (lower, ascii_lower):
+            norm = normalize_line(raw)
+            candidates = [
+                str(raw).strip().lower(),
+                norm.lower() if norm else "",
+            ]
+            ascii_candidates = []
+            for cand in candidates:
+                if cand:
+                    ascii_candidates.append(
+                        unicodedata.normalize("NFKD", cand)
+                        .encode("ascii", "ignore")
+                        .decode("ascii")
+                    )
+            candidates.extend(ascii_candidates)
+            for candidate in candidates:
+                if not candidate:
+                    continue
                 for pattern in DOC_LOADING_PATTERNS:
                     if pattern in candidate:
-                        return raw
-        return ""
+                        return {
+                            "raw": str(raw),
+                            "norm": norm,
+                            "x": int(x),
+                            "y": int(y),
+                            "w": int(w),
+                            "h": int(h),
+                        }
+        return None
+
+    def _detect_overlay_in_rel_box(self, rel_box):
+        if not self.current_rect or not rel_box:
+            return None
+        try:
+            rx, ry, rw, rh = rel_to_abs(self.current_rect, rel_box)
+        except Exception:
+            return None
+        try:
+            img, scale = _grab_region_color_generic(
+                self.current_rect, rel_box, self.upscale_var.get()
+            )
+        except Exception:
+            return None
+        df = do_ocr_data(
+            img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+        )
+        lines = lines_from_tsv(df, scale=scale)
+        overlay = self._find_overlay_entry(lines)
+        if not overlay:
+            return None
+        entry = overlay.copy()
+        entry["abs_x"] = rx + overlay["x"]
+        entry["abs_y"] = ry + overlay["y"]
+        entry["abs_w"] = overlay["w"]
+        entry["abs_h"] = overlay["h"]
+        return entry
 
     def _wait_for_doclist_ready(self, prefix="", timeout=12.0, reason=""):
         doc_rect = self._doclist_abs_rect()
@@ -1455,26 +1524,33 @@ class RDPApp(tk.Tk):
         suffix = f" ({reason})" if reason else ""
         start = time.time()
         notified = False
+        last_log = 0.0
         while True:
-            doc_img, doc_scale = _grab_region_color_generic(
-                self.current_rect, self.cfg["doclist_region"], self.upscale_var.get()
-            )
-            df = do_ocr_data(
-                doc_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
-            )
-            lines = lines_from_tsv(df, scale=doc_scale)
-            overlay = self._find_doclist_overlay_text(lines)
+            overlay = self._detect_overlay_in_rel_box(self.cfg["doclist_region"])
             if not overlay:
                 if notified:
                     self.log_print(
                         f"{prefix}Document list overlay cleared{suffix}."
                     )
                 return
-            if not notified:
-                desc = normalize_line(overlay) or overlay
+            now = time.time()
+            desc = (
+                overlay.get("norm")
+                or normalize_line(overlay.get("raw"))
+                or overlay.get("raw")
+                or "(overlay text not recognized)"
+            )
+            coords = (
+                overlay.get("abs_x", 0),
+                overlay.get("abs_y", 0),
+                overlay.get("abs_w", 0),
+                overlay.get("abs_h", 0),
+            )
+            if (not notified) or (now - last_log >= 1.5):
                 self.log_print(
-                    f"{prefix}Document list overlay detected{suffix}: '{desc}'. Waiting..."
+                    f"{prefix}Document list overlay detected{suffix}: '{desc}' at ({coords[0]}, {coords[1]}, {coords[2]}x{coords[3]}). Waiting..."
                 )
+                last_log = now
             notified = True
             if time.time() - start > timeout:
                 self.log_print(
@@ -1507,26 +1583,33 @@ class RDPApp(tk.Tk):
         suffix = f" ({reason})" if reason else ""
         start = time.time()
         notified = False
+        last_log = 0.0
         while True:
-            img, scale = _grab_region_color_generic(
-                self.current_rect, rel_box, self.upscale_var.get()
-            )
-            df = do_ocr_data(
-                img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
-            )
-            lines = lines_from_tsv(df, scale=scale)
-            overlay = self._find_doclist_overlay_text(lines)
+            overlay = self._detect_overlay_in_rel_box(rel_box)
             if not overlay:
                 if notified:
                     self.log_print(
                         f"{prefix}Deal search overlay cleared{suffix}."
                     )
                 return
-            if not notified:
-                desc = normalize_line(overlay) or overlay
+            now = time.time()
+            desc = (
+                overlay.get("norm")
+                or normalize_line(overlay.get("raw"))
+                or overlay.get("raw")
+                or "(overlay text not recognized)"
+            )
+            coords = (
+                overlay.get("abs_x", 0),
+                overlay.get("abs_y", 0),
+                overlay.get("abs_w", 0),
+                overlay.get("abs_h", 0),
+            )
+            if (not notified) or (now - last_log >= 1.5):
                 self.log_print(
-                    f"{prefix}Deal search overlay detected{suffix}: '{desc}'. Waiting..."
+                    f"{prefix}Deal search overlay detected{suffix}: '{desc}' at ({coords[0]}, {coords[1]}, {coords[2]}x{coords[3]}). Waiting..."
                 )
+                last_log = now
             notified = True
             if time.time() - start > timeout:
                 self.log_print(
@@ -1541,33 +1624,55 @@ class RDPApp(tk.Tk):
         suffix = f" ({reason})" if reason else ""
         start = time.time()
         notified = False
+        last_log = 0.0
         while True:
-            try:
-                page_img, page_scale = _grab_region_color_generic(
-                    self.current_rect,
-                    self.cfg["pdf_text_region"],
-                    self.upscale_var.get(),
-                )
-            except Exception:
-                return
-            df = do_ocr_data(
-                page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
-            )
-            lines = lines_from_tsv(df, scale=page_scale)
-            overlay = self._find_doclist_overlay_text(lines)
-            if not overlay:
+            overlays = []
+            pdf_box = self.cfg.get("pdf_text_region")
+            if pdf_box:
+                overlay_pdf = self._detect_overlay_in_rel_box(pdf_box)
+                if overlay_pdf:
+                    overlay_pdf["area"] = "PDF view"
+                    overlays.append(overlay_pdf)
+            doc_box = self.cfg.get("doclist_region")
+            if doc_box:
+                overlay_doc = self._detect_overlay_in_rel_box(doc_box)
+                if overlay_doc:
+                    overlay_doc["area"] = "Document list"
+                    overlays.append(overlay_doc)
+            search_box = self._search_overlay_rel_box()
+            if search_box:
+                overlay_search = self._detect_overlay_in_rel_box(search_box)
+                if overlay_search:
+                    overlay_search["area"] = "Document search"
+                    overlays.append(overlay_search)
+            if not overlays:
                 if notified:
-                    self.log_print(f"{prefix}PDF overlay cleared{suffix}.")
+                    self.log_print(f"{prefix}All PDF overlays cleared{suffix}.")
                 return
-            if not notified:
-                desc = normalize_line(overlay) or overlay
-                self.log_print(
-                    f"{prefix}PDF overlay detected{suffix}: '{desc}'. Waiting..."
-                )
+            now = time.time()
+            if (not notified) or (now - last_log >= 1.5):
+                for entry in overlays:
+                    desc = (
+                        entry.get("norm")
+                        or normalize_line(entry.get("raw"))
+                        or entry.get("raw")
+                        or "(overlay text not recognized)"
+                    )
+                    coords = (
+                        entry.get("abs_x", 0),
+                        entry.get("abs_y", 0),
+                        entry.get("abs_w", 0),
+                        entry.get("abs_h", 0),
+                    )
+                    area = entry.get("area", "Overlay")
+                    self.log_print(
+                        f"{prefix}{area} overlay detected{suffix}: '{desc}' at ({coords[0]}, {coords[1]}, {coords[2]}x{coords[3]}). Waiting..."
+                    )
+                last_log = now
             notified = True
-            if time.time() - start > timeout:
+            if now - start > timeout:
                 self.log_print(
-                    f"{prefix}Timeout waiting for PDF overlay to clear{suffix}. Continuing."
+                    f"{prefix}Timeout waiting for PDF overlays to clear{suffix}. Continuing."
                 )
                 return
             time.sleep(0.4)
@@ -1706,6 +1811,16 @@ class RDPApp(tk.Tk):
             self.log_print(
                 f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
             )
+        else:
+            try:
+                extra_wait = float(self.cfg.get("pdf_view_extra_wait", 2.0))
+            except Exception:
+                extra_wait = 2.0
+            if extra_wait > 0:
+                self.log_print(
+                    f"{prefix}Waiting {extra_wait:.1f}s after PDF results click before checking overlays."
+                )
+                time.sleep(extra_wait)
 
         reason = "after PDF results click" if clicked_hits else "before page OCR"
         self._wait_for_pdf_ready(prefix=prefix, reason=reason)
@@ -2270,6 +2385,13 @@ class RDPApp(tk.Tk):
         self.cfg["streitwert_overlay_skip_waits"] = bool(
             self.skip_waits_var.get()
         )
+        if hasattr(self, "pdf_view_wait_var"):
+            try:
+                self.cfg["pdf_view_extra_wait"] = float(
+                    self.pdf_view_wait_var.get() or "2.0"
+                )
+            except Exception:
+                self.cfg["pdf_view_extra_wait"] = DEFAULTS["pdf_view_extra_wait"]
 
     def load_config(self):
         try:
@@ -2308,6 +2430,10 @@ class RDPApp(tk.Tk):
             if hasattr(self, "skip_waits_var"):
                 self.skip_waits_var.set(
                     self.cfg.get("streitwert_overlay_skip_waits", False)
+                )
+            if hasattr(self, "pdf_view_wait_var"):
+                self.pdf_view_wait_var.set(
+                    str(self.cfg.get("pdf_view_extra_wait", 2.0))
                 )
             hits_pt = self.cfg.get("pdf_hits_point")
             if not (
