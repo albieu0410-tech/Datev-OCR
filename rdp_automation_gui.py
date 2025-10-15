@@ -1,4 +1,4 @@
-import os, io, json, time, threading, re
+import os, io, json, time, threading, re, unicodedata
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -195,6 +195,8 @@ def find_green_band(color_img_pil):
 def normalize_line(text: str) -> str:
     if not text:
         return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = text.replace("\u0080", "€")
     fix = str.maketrans({"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"})
     t = text.translate(fix)
     t = re.sub(r"\s+", " ", t).strip()
@@ -202,13 +204,32 @@ def normalize_line(text: str) -> str:
     return t
 
 
-AMOUNT_RE = re.compile(r"\b\d{1,3}(?:[.\s]\d{3})*,\d{2}\s*(?:EUR|€)\b", re.IGNORECASE)
+AMOUNT_RE = re.compile(
+    r"(?:€\s*)?(?:\d{1,3}(?:[.\s]\d{3})+|\d+),\d{2}(?:\s*(?:EUR|€))?",
+    re.IGNORECASE,
+)
 
 
 def extract_amount_from_text(text: str):
     t = normalize_line(text)
-    m = AMOUNT_RE.search(t)
-    return m.group(0) if m else None
+    matches = list(AMOUNT_RE.finditer(t))
+    if not matches:
+        return None
+    for match in matches:
+        candidate = match.group(0).strip().strip(".,;: ")
+        if re.search(r"(EUR|€)", candidate, re.IGNORECASE):
+            return candidate
+    return matches[0].group(0).strip().strip(".,;: ")
+
+
+DOC_LOADING_PATTERNS = (
+    "dokumente werden geladen",
+    "dokumente werden gel",
+    "suche läuft",
+    "suche lauft",
+    "suche laeuft",
+    "suche lauf",
+)
 
 
 def lines_from_tsv(tsv_df, scale=1):
@@ -1378,6 +1399,53 @@ class RDPApp(tk.Tk):
         time.sleep(0.1)
         return True
 
+    def _find_doclist_overlay_text(self, lines):
+        for _, _, _, _, raw in lines:
+            norm = normalize_line(raw)
+            if not norm:
+                continue
+            lower = norm.lower()
+            ascii_lower = unicodedata.normalize("NFKD", lower).encode("ascii", "ignore").decode("ascii")
+            for candidate in (lower, ascii_lower):
+                for pattern in DOC_LOADING_PATTERNS:
+                    if pattern in candidate:
+                        return raw
+        return ""
+
+    def _wait_for_doclist_ready(self, prefix="", timeout=12.0, reason=""):
+        doc_rect = self._doclist_abs_rect()
+        if not doc_rect:
+            return
+        suffix = f" ({reason})" if reason else ""
+        start = time.time()
+        notified = False
+        while True:
+            doc_img, doc_scale = _grab_region_color_generic(
+                self.current_rect, self.cfg["doclist_region"], self.upscale_var.get()
+            )
+            df = do_ocr_data(
+                doc_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+            )
+            lines = lines_from_tsv(df, scale=doc_scale)
+            overlay = self._find_doclist_overlay_text(lines)
+            if not overlay:
+                if notified:
+                    self.log_print(
+                        f"{prefix}Document list overlay cleared{suffix}."
+                    )
+                return
+            if not notified:
+                self.log_print(
+                    f"{prefix}Document list shows loading overlay{suffix}; waiting..."
+                )
+            notified = True
+            if time.time() - start > timeout:
+                self.log_print(
+                    f"{prefix}Timeout waiting for document list overlay to clear{suffix}. Continuing."
+                )
+                return
+            time.sleep(0.5)
+
     def _type_pdf_search(self, query, prefix="", press_enter=True):
         if not self.current_rect:
             return False
@@ -1610,6 +1678,9 @@ class RDPApp(tk.Tk):
                 self.log_print(
                     f"[{idx}/{total}] Typed '{aktenzeichen}' into the document search box."
                 )
+                self._wait_for_doclist_ready(
+                    prefix=f"[{idx}/{total}] ", reason="after Aktenzeichen search"
+                )
 
                 term = self.streitwort_var.get().strip() or "Streitwert"
                 if not self._type_pdf_search(
@@ -1623,6 +1694,9 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] Typed '{term}' into the PDF search box."
                 )
                 time.sleep(list_wait)
+                self._wait_for_doclist_ready(
+                    prefix=f"[{idx}/{total}] ", reason="after PDF search"
+                )
 
                 rx, ry, rw, rh = doc_rect
                 focus_x = rx + max(5, rw // 40)
@@ -1741,6 +1815,7 @@ class RDPApp(tk.Tk):
                 return
             self.log_print(f"[Test] Typed '{term}' into the PDF search box.")
             time.sleep(list_wait)
+            self._wait_for_doclist_ready(prefix="[Test] ", reason="after PDF search")
 
             rx, ry, rw, rh = doc_rect
             focus_x = rx + max(5, rw // 40)
