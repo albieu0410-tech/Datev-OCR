@@ -1,4 +1,5 @@
 import os, io, json, time, threading, re
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -50,6 +51,9 @@ DEFAULTS = {
     "amount_profiles": [],  # list of dicts
     "active_amount_profile": "",  # profile name
     "use_amount_profile": False,  # if True, restrict OCR to profile sub-region
+    # -------- NEW: Rechnungen capture --------
+    "rechnungen_region": [0.0, 0.0, 0.0, 0.0],
+    "rechnungen_csv": "Streitwert_Results_Rechnungen.csv",
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -64,6 +68,8 @@ def load_cfg():
         cfg.setdefault("amount_profiles", [])
         cfg.setdefault("active_amount_profile", "")
         cfg.setdefault("use_amount_profile", False)
+        cfg.setdefault("rechnungen_region", [0.0, 0.0, 0.0, 0.0])
+        cfg.setdefault("rechnungen_csv", DEFAULTS["rechnungen_csv"])
         return cfg
     return DEFAULTS.copy()
 
@@ -179,6 +185,8 @@ def find_green_band(color_img_pil):
 
 # ---------- Normalization / parsing ----------
 AMOUNT_RE = re.compile(r"\b\d+(?:[.\s]\d{3})*[.,]\d{2}\s*(?:EUR|€)?\b", re.IGNORECASE)
+DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+INVOICE_RE = re.compile(r"\b\d{5,}\b")
 DIGIT_FIX = str.maketrans(
     {"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"}
 )
@@ -276,6 +284,7 @@ class RDPApp(tk.Tk):
         self.current_rect = None
         self.ocr_preview_imgtk = None
         self._current_profile_sub_region = None
+        self._run_rechnungen_first = False
 
         self.create_widgets()
 
@@ -328,13 +337,6 @@ class RDPApp(tk.Tk):
         )
         self.col_var = tk.StringVar(value=self.cfg["input_column"])
         ttk.Entry(left, textvariable=self.col_var, width=20).pack(
-            anchor="w", pady=(0, 6)
-        )
-
-        # Results CSV
-        ttk.Label(left, text="Results CSV").pack(anchor="w")
-        self.csv_var = tk.StringVar(value=self.cfg["results_csv"])
-        ttk.Entry(left, textvariable=self.csv_var, width=42).pack(
             anchor="w", pady=(0, 6)
         )
 
@@ -449,6 +451,65 @@ class RDPApp(tk.Tk):
         ttk.Checkbutton(
             nr, text="Normalize OCR (O→0, S→5…)", variable=self.normalize_var
         ).pack(side=tk.LEFT)
+
+        # ---------------- Tabs: Streitwert & Rechnungen ----------------
+        tabs = ttk.Notebook(left)
+        tabs.pack(anchor="w", fill=tk.X, pady=10)
+
+        self.streitwert_tab = ttk.Frame(tabs, padding=6)
+        self.rechnungen_tab = ttk.Frame(tabs, padding=6)
+        tabs.add(self.streitwert_tab, text="Streitwert")
+        tabs.add(self.rechnungen_tab, text="Rechnungen")
+
+        # Streitwert tab contents
+        ttk.Label(self.streitwert_tab, text="Results CSV").pack(anchor="w")
+        self.csv_var = tk.StringVar(value=self.cfg["results_csv"])
+        ttk.Entry(
+            self.streitwert_tab, textvariable=self.csv_var, width=42
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Label(self.streitwert_tab, text="Rechnungen CSV").pack(
+            anchor="w", pady=(4, 0)
+        )
+        self.rechnungen_csv_var = tk.StringVar(
+            value=self.cfg.get("rechnungen_csv", DEFAULTS["rechnungen_csv"])
+        )
+        ttk.Entry(
+            self.streitwert_tab, textvariable=self.rechnungen_csv_var, width=42
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Button(
+            self.streitwert_tab,
+            text="Start Streitwert Scan + Rechnungen",
+            command=self.run_streitwert_with_rechnungen_threaded,
+        ).pack(anchor="w", pady=(8, 0))
+
+        # Rechnungen tab contents
+        ttk.Label(
+            self.rechnungen_tab,
+            text="Rechnungen Region (l%, t%, w%, h%)",
+        ).pack(anchor="w")
+        rr = self.cfg.get("rechnungen_region", [0.0, 0.0, 0.0, 0.0])
+        self.rechnungen_region_var = tk.StringVar(
+            value=", ".join(f"{float(v):.3f}" for v in rr)
+        )
+        ttk.Entry(
+            self.rechnungen_tab, textvariable=self.rechnungen_region_var, width=40
+        ).pack(anchor="w", pady=(0, 4))
+
+        rbtn = ttk.Frame(self.rechnungen_tab)
+        rbtn.pack(anchor="w", pady=(4, 0))
+        ttk.Button(
+            rbtn, text="Pick Rechnungen Region", command=self.pick_rechnungen_region
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            rbtn, text="Test Rechnungen Extraction", command=self.test_rechnungen
+        ).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(
+            self.rechnungen_tab,
+            text="Use the test button to verify OCR before running the scan.",
+        ).pack(anchor="w", pady=(6, 0))
 
         ttk.Button(
             left, text="Test Parse (full region)", command=self.test_parse_full
@@ -657,6 +718,41 @@ class RDPApp(tk.Tk):
             f"Picked Amount Sub-Region (relative to result_region): {', '.join(f'{v:.3f}' for v in sub_rel)}"
         )
 
+    def pick_rechnungen_region(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        messagebox.showinfo(
+            "Pick Rechnungen Region",
+            "Position your mouse over the TOP-LEFT corner of the Rechnungen area.\n"
+            "Waiting 3 seconds after you click OK...",
+        )
+        self.update()
+        time.sleep(3)
+        x1, y1 = pyautogui.position()
+
+        messagebox.showinfo(
+            "Pick Rechnungen Region",
+            "Now position your mouse over the BOTTOM-RIGHT corner.\nWaiting 3 seconds after you click OK...",
+        )
+        self.update()
+        time.sleep(3)
+        x2, y2 = pyautogui.position()
+
+        left, top = min(x1, x2), min(y1, y2)
+        width, height = abs(x2 - x1), abs(y2 - y1)
+        rel_box = abs_to_rel(self.current_rect, abs_box=(left, top, width, height))
+        self.cfg["rechnungen_region"] = rel_box
+        if hasattr(self, "rechnungen_region_var"):
+            self.rechnungen_region_var.set(
+                ", ".join(f"{v:.3f}" for v in rel_box)
+            )
+        self.log_print(
+            f"Rechnungen region set (relative): {', '.join(f'{v:.3f}' for v in rel_box)}"
+        )
+
     def test_typing(self):
         try:
             if not self.current_rect:
@@ -709,6 +805,24 @@ class RDPApp(tk.Tk):
             self.log_print(f"Extracted amount: {amount or '(none)'}")
         except Exception as e:
             messagebox.showerror("Test Parse (profile)", f"Failed: {e}")
+
+    def test_rechnungen(self):
+        try:
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            crop, lines, entries, summary = self._read_rechnungen_region()
+            self.show_preview(crop)
+            if lines:
+                joined = "\n".join(t for _, t in lines if t.strip())
+                self.log_print("Rechnungen OCR:\n" + joined)
+            else:
+                self.log_print("Rechnungen OCR:\n(no text)")
+            self._log_rechnungen_summary(summary)
+        except Exception as e:
+            messagebox.showerror("Rechnungen Test", f"Failed: {e}")
 
     # ---------- Core OCR/parse ----------
     def apply_paths_to_tesseract(self):
@@ -774,7 +888,170 @@ class RDPApp(tk.Tk):
         amount, line = extract_amount_from_lines(lines, keyword=keyword)
         return full_text, crop, lines, amount
 
+    # ---------- Rechnungen helpers ----------
+    def _validate_rechnungen_region(self):
+        l, t, w, h = self.cfg.get("rechnungen_region", [0.0, 0.0, 0.0, 0.0])
+        if w <= 0 or h <= 0:
+            raise ValueError(
+                "Invalid Rechnungen Region. Please pick a non-zero area in the Rechnungen tab."
+            )
+
+    def _grab_rechnungen_region(self):
+        self._validate_rechnungen_region()
+        rx, ry, rw, rh = rel_to_abs(self.current_rect, self.cfg["rechnungen_region"])
+        region = grab_xywh(rx, ry, rw, rh)
+        scale = max(1, int(self.upscale_var.get() or 3))
+        return upscale_pil(region, scale=scale)
+
+    def _amount_to_float(self, amount_text: str) -> float:
+        clean = amount_text.upper().replace("EUR", "").replace("€", "")
+        clean = clean.replace(" ", "")
+        clean = clean.replace(".", "").replace(",", ".")
+        return float(clean)
+
+    def _format_currency(self, value: float) -> str:
+        return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _parse_rechnungen_entries(self, lines):
+        entries = []
+        seen = set()
+        for _, raw in lines:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            text = text.translate(DIGIT_FIX)
+            text = re.sub(r"\s+", " ", text)
+            date_match = DATE_RE.search(text)
+            amount_match = AMOUNT_RE.search(text)
+            if not date_match or not amount_match:
+                continue
+            date_str = date_match.group(0)
+            amount_text = amount_match.group(0)
+            trailing = text[amount_match.end() :]
+            invoice_match = INVOICE_RE.search(trailing)
+            invoice = ""
+            if invoice_match:
+                invoice = re.sub(r"\D", "", invoice_match.group(0))
+            try:
+                amount_value = self._amount_to_float(amount_text)
+            except ValueError:
+                continue
+            try:
+                date_val = datetime.strptime(date_str, "%d.%m.%Y")
+            except ValueError:
+                continue
+            key = (date_str, round(amount_value, 2), invoice)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(
+                {
+                    "date": date_val,
+                    "date_str": date_str,
+                    "amount": amount_value,
+                    "amount_str": self._format_currency(amount_value),
+                    "invoice": invoice,
+                    "raw": text,
+                }
+            )
+        return entries
+
+    def _summarize_rechnungen_entries(self, entries):
+        total_candidates = [e for e in entries if not e.get("invoice")]
+        total_entry = (
+            max(total_candidates, key=lambda e: e["date"]) if total_candidates else None
+        )
+
+        invoice_entries = [e for e in entries if e.get("invoice")]
+        invoice_entries.sort(key=lambda e: e["date"])
+        if invoice_entries:
+            received_court = invoice_entries[-1]
+            received_gg = invoice_entries[0] if len(invoice_entries) > 1 else None
+        else:
+            received_court = None
+            received_gg = None
+
+        return {
+            "total": total_entry,
+            "received_court": received_court,
+            "received_gg": received_gg,
+        }
+
+    def _read_rechnungen_region(self):
+        crop = self._grab_rechnungen_region()
+        lang = self.lang_var.get().strip() or "deu+eng"
+        df = do_ocr_data(crop, lang=lang, psm=6)
+        lines = lines_from_tsv(df)
+        cleaned = []
+        for y, text in lines:
+            txt = str(text or "").strip()
+            if not txt:
+                continue
+            txt = txt.translate(DIGIT_FIX)
+            txt = re.sub(r"\s+", " ", txt)
+            cleaned.append((y, txt))
+        cleaned.sort(key=lambda x: x[0])
+        entries = self._parse_rechnungen_entries(cleaned)
+        summary = self._summarize_rechnungen_entries(entries)
+        return crop, cleaned, entries, summary
+
+    def _summary_amount_text(self, entry):
+        if not entry:
+            return "0,00 EUR"
+        return f"{entry['amount_str']} EUR"
+
+    def _log_rechnungen_summary(self, summary):
+        total_text = self._summary_amount_text(summary.get("total"))
+        self.log_print(f"-Total Fees: {total_text}")
+
+        court_entry = summary.get("received_court")
+        if court_entry:
+            details = court_entry["date_str"]
+            if court_entry.get("invoice"):
+                details += f" {court_entry['invoice']}"
+            self.log_print(
+                f"-Received Court Fees ({details}) {self._summary_amount_text(court_entry)}"
+            )
+        else:
+            self.log_print("-Received Court Fees: 0,00 EUR")
+
+        gg_entry = summary.get("received_gg")
+        if gg_entry:
+            details = gg_entry["date_str"]
+            if gg_entry.get("invoice"):
+                details += f" {gg_entry['invoice']}"
+            self.log_print(
+                f"-Received GG ({details}) {self._summary_amount_text(gg_entry)}"
+            )
+        else:
+            self.log_print("-Received GG: 0,00 EUR")
+
+    def _save_rechnungen_csv(self, summary, lines):
+        path = (self.rechnungen_csv_var.get() or "").strip() or DEFAULTS["rechnungen_csv"]
+        total = summary.get("total")
+        court = summary.get("received_court")
+        gg = summary.get("received_gg")
+        row = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_fees": self._summary_amount_text(total),
+            "total_fees_date": total["date_str"] if total else "",
+            "total_fees_invoice": total.get("invoice", "") if total else "",
+            "received_court_fees": self._summary_amount_text(court),
+            "received_court_fees_date": court["date_str"] if court else "",
+            "received_court_fees_invoice": court.get("invoice", "") if court else "",
+            "received_gg": self._summary_amount_text(gg),
+            "received_gg_date": gg["date_str"] if gg else "",
+            "received_gg_invoice": gg.get("invoice", "") if gg else "",
+            "raw_ocr": " | ".join(t for _, t in (lines or [])),
+        }
+        pd.DataFrame([row]).to_csv(path, index=False, encoding="utf-8-sig")
+        self.log_print(f"Rechnungen summary saved to {path}")
+
     # ---------- Batch ----------
+    def run_streitwert_with_rechnungen_threaded(self):
+        self._run_rechnungen_first = True
+        self.run_batch_threaded()
+
     def run_batch_threaded(self):
         threading.Thread(target=self.run_batch, daemon=True).start()
 
@@ -786,6 +1063,16 @@ class RDPApp(tk.Tk):
 
             _, rect = connect_rdp_window(self.rdp_var.get())
             self.current_rect = rect
+
+            run_rechnungen = self._run_rechnungen_first
+            self._run_rechnungen_first = False
+            if run_rechnungen:
+                try:
+                    crop, lines, entries, summary = self._read_rechnungen_region()
+                    self._log_rechnungen_summary(summary)
+                    self._save_rechnungen_csv(summary, lines)
+                except Exception as e:
+                    self.log_print(f"ERROR during Rechnungen extraction: {e}")
 
             df = pd.read_excel(
                 self.cfg["excel_path"], sheet_name=self.cfg["excel_sheet"]
@@ -879,6 +1166,10 @@ class RDPApp(tk.Tk):
         self.cfg["excel_sheet"] = int(sv) if sv.isdigit() else sv
         self.cfg["input_column"] = self.col_var.get().strip()
         self.cfg["results_csv"] = self.csv_var.get().strip()
+        self.cfg["rechnungen_csv"] = (
+            (self.rechnungen_csv_var.get() or "").strip()
+            or DEFAULTS["rechnungen_csv"]
+        )
         self.cfg["tesseract_path"] = self.tess_var.get().strip()
         self.cfg["tesseract_lang"] = self.lang_var.get().strip() or "deu+eng"
         try:
@@ -911,6 +1202,16 @@ class RDPApp(tk.Tk):
         self.cfg["use_amount_profile"] = bool(self.use_profile_var.get())
         self.cfg["active_amount_profile"] = self.profile_var.get() or ""
 
+        region_text = (self.rechnungen_region_var.get() or "").strip()
+        parts = [p.strip() for p in region_text.split(",")]
+        if len(parts) == 4:
+            try:
+                self.cfg["rechnungen_region"] = [
+                    float(p.replace("%", "")) for p in parts
+                ]
+            except ValueError:
+                pass
+
     def load_config(self):
         try:
             self.cfg = load_cfg()  # Load from file
@@ -921,6 +1222,9 @@ class RDPApp(tk.Tk):
             self.sheet_var.set(str(self.cfg["excel_sheet"]))
             self.col_var.set(self.cfg["input_column"])
             self.csv_var.set(self.cfg["results_csv"])
+            self.rechnungen_csv_var.set(
+                self.cfg.get("rechnungen_csv", DEFAULTS["rechnungen_csv"])
+            )
             self.tess_var.set(self.cfg["tesseract_path"])
             self.lang_var.set(self.cfg["tesseract_lang"])
             self.type_var.set(str(self.cfg["type_delay"]))
@@ -932,6 +1236,11 @@ class RDPApp(tk.Tk):
             self.fullparse_var.set(self.cfg.get("use_full_region_parse", True))
             self.keyword_var.set(self.cfg.get("keyword", "Honorar"))
             self.normalize_var.set(self.cfg.get("normalize_ocr", True))
+
+            rr = self.cfg.get("rechnungen_region", [0.0, 0.0, 0.0, 0.0])
+            self.rechnungen_region_var.set(
+                ", ".join(f"{float(v):.3f}" for v in rr)
+            )
 
             # Profiles UI
             self.profile_names = [
