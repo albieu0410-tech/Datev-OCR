@@ -1221,6 +1221,139 @@ class RDPApp(tk.Tk):
         pyautogui.doubleClick(click_x, click_y)
         return True
 
+    def _type_doclist_query(self, query, press_enter=True):
+        if not self.current_rect:
+            return False
+        try:
+            sx, sy = rel_to_abs(self.current_rect, self.cfg["search_point"])
+        except Exception:
+            self.log_print(
+                "Doc list search point is not configured. Please calibrate the search point."
+            )
+            return False
+
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        pyautogui.click(sx, sy)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.press("backspace")
+        pyautogui.typewrite(query or "", interval=float(self.type_var.get() or 0.02))
+        if press_enter:
+            pyautogui.press("enter")
+        return True
+
+    def _close_active_pdf(self):
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            return
+        pyautogui.hotkey("ctrl", "w")
+        time.sleep(0.4)
+        pyautogui.hotkey("ctrl", "f4")
+        time.sleep(0.2)
+
+    def _process_open_pdf(self, term):
+        sx, sy = rel_to_abs(self.current_rect, self.cfg["pdf_search_point"])
+        pyautogui.click(sx, sy)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.press("backspace")
+        pyautogui.typewrite(term, interval=float(self.type_var.get() or 0.02))
+        pyautogui.press("enter")
+        time.sleep(float(self.hitwait_var.get() or 1.0))
+
+        hits_img = _grab_region_color_generic(
+            self.current_rect,
+            self.cfg["pdf_hits_region"],
+            self.upscale_var.get(),
+        )
+        dfh = do_ocr_data(
+            hits_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+        )
+        hits = lines_from_tsv(dfh)
+        if hits:
+            target = None
+            for xh, yh, wh, hh, t in hits:
+                if term.lower() in (t or "").lower():
+                    target = (xh, yh, wh, hh, t)
+                    break
+            if target is None:
+                target = hits[0]
+            xh, yh, wh, hh, _ = target
+            rxh, ryh, _, _ = rel_to_abs(
+                self.current_rect, self.cfg["pdf_hits_region"]
+            )
+            hx_abs = rxh + max(10, xh + 10)
+            hy_abs = ryh + yh + hh // 2
+            pyautogui.click(hx_abs, hy_abs)
+            time.sleep(float(self.hitwait_var.get() or 1.0))
+        else:
+            rxh, ryh, _, _ = rel_to_abs(
+                self.current_rect, self.cfg["pdf_hits_region"]
+            )
+            pyautogui.click(rxh + 20, ryh + 30)
+            time.sleep(float(self.hitwait_var.get() or 1.0))
+
+        page_img = _grab_region_color_generic(
+            self.current_rect,
+            self.cfg["pdf_text_region"],
+            self.upscale_var.get(),
+        )
+        dft = do_ocr_data(
+            page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+        )
+        lines_pg = lines_from_tsv(dft)
+        combined = "\n".join(normalize_line(t) for _, _, _, _, t in lines_pg)
+        return extract_amount_from_text(combined)
+
+    def _gather_aktenzeichen(self):
+        try:
+            df = pd.read_excel(
+                self.cfg["excel_path"], sheet_name=self.cfg["excel_sheet"]
+            )
+        except Exception as exc:
+            self.log_print(f"Failed to open Excel file: {exc}")
+            return []
+
+        start_cell = (self.start_cell_var.get() or "").strip()
+        max_rows = int(self.max_rows_var.get() or "0")
+
+        if start_cell:
+            m = re.match(r"^\s*([A-Za-z]+)\s*([0-9]+)\s*$", start_cell)
+            if not m:
+                self.log_print(
+                    f"Invalid start cell '{start_cell}'. Use spreadsheet format like 'B2'."
+                )
+                return []
+            col_letters, row_num = m.group(1).upper(), int(m.group(2))
+            col_idx = 0
+            for ch in col_letters:
+                col_idx = col_idx * 26 + (ord(ch) - 64)
+            col_idx -= 1
+            rows = df.iloc[max(row_num - 2, 0) :]
+        else:
+            column = self.cfg["input_column"]
+            if column not in df.columns:
+                self.log_print(
+                    f"Column '{column}' not found in the Excel sheet for Streitwert scan."
+                )
+                return []
+            col_idx = df.columns.get_loc(column)
+            rows = df
+
+        if max_rows > 0:
+            rows = rows.head(max_rows)
+
+        queries = []
+        for _, row in rows.iterrows():
+            q = str(row.iloc[col_idx]).strip()
+            if q and q.lower() != "nan":
+                queries.append((q, row.to_dict()))
+
+        if not queries:
+            self.log_print(
+                "No Aktenzeichen values were found in the configured Excel sheet."
+            )
+        return queries
+
     def run_streitwert(self):
         try:
             self.pull_form_into_cfg()
@@ -1232,19 +1365,6 @@ class RDPApp(tk.Tk):
                     return
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
 
-            # 1) OCR the document list region and filter rows
-            doc_img = _grab_region_color_generic(
-                self.current_rect,
-                self.cfg["doclist_region"],
-                self.upscale_var.get(),
-            )
-            df = do_ocr_data(
-                doc_img,
-                lang=self.lang_var.get().strip() or "deu+eng",
-                psm=6,
-            )
-            lines = lines_from_tsv(df)  # (x,y,w,h,text)
-
             doc_rect = self._doclist_abs_rect()
             if not doc_rect:
                 self.log_print(
@@ -1252,133 +1372,93 @@ class RDPApp(tk.Tk):
                 )
                 return
 
-            to_open, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
-            ordered = self._prioritize_streitwert_matches(to_open, inc)
-
-            self.log_print(
-                f"Doc list OCR produced {len(lines)} lines; matched {len(to_open)} rows."
-            )
-            if not ordered:
-                if not lines:
-                    self.log_print("No OCR lines detected in document list region.")
-                else:
-                    preview = ", ".join(
-                        f"{reason}: {raw}" for raw, reason in debug_rows[:5]
-                    )
-                    if preview:
-                        self.log_print(
-                            "First OCR rows (with reasons): " + preview
-                        )
-                    else:
-                        sample = ", ".join((txt or "").strip() for *_, txt in lines[:5])
-                        if sample:
-                            self.log_print(
-                                "First OCR rows: " + sample
-                            )
-                self.log_print(
-                    "No rows matched include filters. Adjust tokens or verify OCR via the test button."
-                )
+            queries = self._gather_aktenzeichen()
+            if not queries:
                 return
-            else:
-                preview = ", ".join(
-                    f"{match['token'] or 'any'} → {match['raw']}" for match in ordered[:5]
-                )
-                self.log_print(
-                    f"Opening {len(ordered)} row(s) based on include mapping. First entries: {preview}"
-                )
+
+            list_wait = float(self.cfg.get("post_search_wait", 1.2))
+            doc_wait = float(self.docwait_var.get() or 1.2)
+            term = self.streitwort_var.get() or "Streitwert"
 
             results = []
-            for i, match in enumerate(ordered, 1):
-                if not self._open_doclist_entry(
-                    match, doc_rect, focus_first=(i == 1)
-                ):
+            total = len(queries)
+            for idx, (aktenzeichen, _row) in enumerate(queries, 1):
+                self.log_print(
+                    f"[{idx}/{total}] Searching doc list for Aktenzeichen: {aktenzeichen}"
+                )
+                if not self._type_doclist_query(aktenzeichen):
                     self.log_print(
-                        f"[{i}/{len(ordered)}] Unable to activate doc row: {match.get('raw','')}"
+                        f"[{idx}/{total}] Unable to type Aktenzeichen. Skipping entry."
                     )
                     continue
-                time.sleep(float(self.docwait_var.get() or 1.2))
+                time.sleep(list_wait)
 
-                # 2) Search inside PDF
-                sx, sy = rel_to_abs(
-                    self.current_rect, self.cfg["pdf_search_point"]
-                )
-                pyautogui.click(sx, sy)
-                pyautogui.hotkey("ctrl", "a")
-                pyautogui.press("backspace")
-                term = self.streitwort_var.get() or "Streitwert"
-                pyautogui.typewrite(
-                    term, interval=float(self.type_var.get() or 0.02)
-                )
-                pyautogui.press("enter")
-                time.sleep(float(self.hitwait_var.get() or 1.0))
-
-                # 3) Click topmost hit in hits panel
-                hits_img = _grab_region_color_generic(
+                doc_img = _grab_region_color_generic(
                     self.current_rect,
-                    self.cfg["pdf_hits_region"],
+                    self.cfg["doclist_region"],
                     self.upscale_var.get(),
                 )
-                dfh = do_ocr_data(
-                    hits_img,
+                df = do_ocr_data(
+                    doc_img,
                     lang=self.lang_var.get().strip() or "deu+eng",
                     psm=6,
                 )
-                hits = lines_from_tsv(dfh)
-                hx_abs = hy_abs = None
-                if hits:
-                    target = None
-                    for xh, yh, wh, hh, t in hits:
-                        if term.lower() in t.lower():
-                            target = (xh, yh, wh, hh, t)
-                            break
-                    if target is None:
-                        target = hits[0]
-                    xh, yh, wh, hh, _ = target
-                    rxh, ryh, _, _ = rel_to_abs(
-                        self.current_rect, self.cfg["pdf_hits_region"]
-                    )
-                    hx_abs = rxh + max(10, xh + 10)
-                    hy_abs = ryh + yh + hh // 2
-                    pyautogui.click(hx_abs, hy_abs)
-                    time.sleep(float(self.hitwait_var.get() or 1.0))
-                else:
-                    rxh, ryh, _, _ = rel_to_abs(
-                        self.current_rect, self.cfg["pdf_hits_region"]
-                    )
-                    pyautogui.click(rxh + 20, ryh + 30)
-                    time.sleep(float(self.hitwait_var.get() or 1.0))
+                lines = lines_from_tsv(df)
+                matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
+                ordered = self._prioritize_streitwert_matches(matches, inc)
 
-                # 4) Read amount from page text region
-                page_img = _grab_region_color_generic(
-                    self.current_rect,
-                    self.cfg["pdf_text_region"],
-                    self.upscale_var.get(),
-                )
-                dft = do_ocr_data(
-                    page_img,
-                    lang=self.lang_var.get().strip() or "deu+eng",
-                    psm=6,
-                )
-                lines_pg = lines_from_tsv(dft)
-                combined = "\n".join(
-                    normalize_line(t) for _, _, _, _, t in lines_pg
-                )
-                amount = extract_amount_from_text(combined)
+                if not ordered:
+                    reason = ", ".join(
+                        f"{r}: {raw}" for raw, r in debug_rows[:4]
+                    )
+                    if not reason:
+                        sample = ", ".join((txt or "").strip() for *_, txt in lines[:4])
+                        reason = sample or "no OCR rows"
+                    self.log_print(
+                        f"[{idx}/{total}] No matching rows for '{aktenzeichen}'. Details: {reason}"
+                    )
+                    continue
 
-                results.append({
-                    "row_text": match["norm"],
-                    "amount": amount or "",
-                })
+                first = ordered[0]
+                tag = first.get("token") or "any"
+                preview = ", ".join(
+                    f"{m['token'] or 'any'} → {m['raw']}" for m in ordered[:3]
+                )
                 self.log_print(
-                    f"[{i}/{len(ordered)}] {match['norm']} → {amount or '(none)'}"
+                    f"[{idx}/{total}] Opening {tag} match: {first['raw']} | candidates: {preview}"
                 )
 
-            pd.DataFrame(results).to_csv(
-                self.streit_csv_var.get(), index=False, encoding="utf-8-sig"
-            )
-            self.log_print(
-                f"Done. Saved Streitwert results to {self.streit_csv_var.get()}"
-            )
+                if not self._open_doclist_entry(first, doc_rect, focus_first=True):
+                    self.log_print(
+                        f"[{idx}/{total}] Unable to activate doc row: {first.get('raw','')}"
+                    )
+                    continue
+
+                time.sleep(doc_wait)
+                amount = self._process_open_pdf(term)
+                results.append(
+                    {
+                        "aktenzeichen": aktenzeichen,
+                        "row_text": first["norm"],
+                        "amount": amount or "",
+                    }
+                )
+                self.log_print(
+                    f"[{idx}/{total}] {aktenzeichen} / {first['norm']} → {amount or '(none)'}"
+                )
+
+                self._close_active_pdf()
+                time.sleep(0.5)
+
+            if results:
+                pd.DataFrame(results).to_csv(
+                    self.streit_csv_var.get(), index=False, encoding="utf-8-sig"
+                )
+                self.log_print(
+                    f"Done. Saved Streitwert results to {self.streit_csv_var.get()}"
+                )
+            else:
+                self.log_print("No Streitwert results were collected from the Excel list.")
 
         except Exception as e:
             self.log_print("ERROR: " + repr(e))
@@ -1394,6 +1474,18 @@ class RDPApp(tk.Tk):
                     return
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
 
+            doc_rect = self._doclist_abs_rect()
+            if not doc_rect:
+                self.log_print("[Test] Doc list region not configured.")
+                return
+
+            term = self.streitwort_var.get() or "Streitwert"
+            if not self._type_doclist_query(term):
+                self.log_print("[Test] Unable to type into doc list search.")
+                return
+
+            time.sleep(float(self.cfg.get("post_search_wait", 1.2)))
+
             doc_img = _grab_region_color_generic(
                 self.current_rect,
                 self.cfg["doclist_region"],
@@ -1407,62 +1499,37 @@ class RDPApp(tk.Tk):
             lines = lines_from_tsv(df)
             matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
             ordered = self._prioritize_streitwert_matches(matches, inc)
-            doc_rect = self._doclist_abs_rect()
 
             self.log_print(
                 f"[Test] Doc list OCR lines: {len(lines)} | includes: {inc or ['(none)']} | excludes: {exc or ['(none)']}"
             )
-            if matches:
-                for match in ordered[:5]:
-                    tag = match["token"] or "any"
-                    self.log_print(f"  MATCH ({tag}) → {match['raw']}")
-            else:
+            if not ordered:
                 preview = debug_rows[:5] or [(raw, "") for *_, raw in lines[:5]]
                 for raw, reason in preview:
                     desc = f"  {reason or 'OCR'} → {raw}"
                     self.log_print(desc)
+                self.log_print("[Test] No rows matched the include tokens after typing 'Streitwert'.")
+                return
 
-            if ordered and doc_rect:
-                first = ordered[0]
-                if self._open_doclist_entry(first, doc_rect, focus_first=True):
-                    self.log_print(
-                        f"[Test] Opened first matching row ({first['token'] or 'any'}): {first['raw']}"
-                    )
-                    time.sleep(float(self.docwait_var.get() or 1.2))
-                else:
-                    self.log_print("[Test] Failed to click first matching row.")
-            elif not doc_rect:
-                self.log_print("[Test] Doc list region not configured.")
-
-            try:
-                sx, sy = rel_to_abs(
-                    self.current_rect, self.cfg["pdf_search_point"]
-                )
+            first = ordered[0]
+            tag = first.get("token") or "any"
+            if self._open_doclist_entry(first, doc_rect, focus_first=True):
                 self.log_print(
-                    f"[Test] PDF search point absolute position: ({sx}, {sy})"
+                    f"[Test] Opened first matching row ({tag}): {first['raw']}"
                 )
-            except Exception:
-                self.log_print("[Test] PDF search point not configured.")
+            else:
+                self.log_print("[Test] Failed to open the first matching row.")
+                return
 
-            try:
-                hx, hy, hw, hh = rel_to_abs(
-                    self.current_rect, self.cfg["pdf_hits_region"]
-                )
-                self.log_print(
-                    f"[Test] PDF hits region abs: x={hx}, y={hy}, w={hw}, h={hh}"
-                )
-            except Exception:
-                self.log_print("[Test] PDF hits region not configured.")
+            time.sleep(float(self.docwait_var.get() or 1.2))
+            amount = self._process_open_pdf(term)
+            self.log_print(
+                f"[Test] Extracted Streitwert amount: {amount or '(none)'}"
+            )
 
-            try:
-                tx, ty, tw, th = rel_to_abs(
-                    self.current_rect, self.cfg["pdf_text_region"]
-                )
-                self.log_print(
-                    f"[Test] PDF text region abs: x={tx}, y={ty}, w={tw}, h={th}"
-                )
-            except Exception:
-                self.log_print("[Test] PDF text region not configured.")
+            self._close_active_pdf()
+            time.sleep(0.5)
+            self.log_print("[Test] Closed PDF after verification.")
 
             self.log_print("[Test] Streitwert setup check finished.")
 
