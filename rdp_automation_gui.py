@@ -64,6 +64,7 @@ DEFAULTS = {
     "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
     "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
     "pdf_close_point": [0.97, 0.05],  # close button for the PDF viewer window
+    "streitwert_overlay_skip_waits": False,  # rely solely on overlay detection delays
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -669,6 +670,15 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
+        self.skip_waits_var = tk.BooleanVar(
+            value=self.cfg.get("streitwert_overlay_skip_waits", False)
+        )
+        ttk.Checkbutton(
+            streit_frame,
+            text="Only wait for loading overlays (ignore manual delays)",
+            variable=self.skip_waits_var,
+        ).pack(anchor="w", pady=(6, 0))
+
         ttk.Label(streit_frame, text="Streitwert CSV").pack(anchor="w", pady=(6, 0))
         self.streit_csv_var = tk.StringVar(
             value=self.cfg.get(
@@ -805,14 +815,36 @@ class RDPApp(tk.Tk):
         ttk.Button(
             right, text="Toggle Live Preview", command=self.toggle_live_preview
         ).pack(anchor="w", pady=(0, 6))
-        ttk.Label(right, text="Log").pack(anchor="w")
-        log_frame = ttk.Frame(right)
-        log_frame.pack(fill=tk.BOTH, expand=True)
-        self.log = tk.Text(log_frame, height=14, wrap="word")
+        ttk.Label(right, text="Logs").pack(anchor="w")
+        log_notebook = ttk.Notebook(right)
+        log_notebook.pack(fill=tk.BOTH, expand=True)
+
+        detailed_tab = ttk.Frame(log_notebook)
+        simple_tab = ttk.Frame(log_notebook)
+        log_notebook.add(detailed_tab, text="Detailed Log")
+        log_notebook.add(simple_tab, text="Simple Log")
+
+        detailed_frame = ttk.Frame(detailed_tab)
+        detailed_frame.pack(fill=tk.BOTH, expand=True)
+        self.log = tk.Text(detailed_frame, height=14, wrap="word")
         self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
+        log_scroll = ttk.Scrollbar(
+            detailed_frame, orient="vertical", command=self.log.yview
+        )
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log.configure(yscrollcommand=log_scroll.set)
+
+        simple_frame = ttk.Frame(simple_tab)
+        simple_frame.pack(fill=tk.BOTH, expand=True)
+        self.simple_log = tk.Text(
+            simple_frame, height=14, wrap="word", state="disabled"
+        )
+        self.simple_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        simple_scroll = ttk.Scrollbar(
+            simple_frame, orient="vertical", command=self.simple_log.yview
+        )
+        simple_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.simple_log.configure(yscrollcommand=simple_scroll.set)
 
         # Load active profile details into fields
         self._refresh_profile_fields_from_active()
@@ -1435,8 +1467,9 @@ class RDPApp(tk.Tk):
                     )
                 return
             if not notified:
+                desc = normalize_line(overlay) or overlay
                 self.log_print(
-                    f"{prefix}Document list shows loading overlay{suffix}; waiting..."
+                    f"{prefix}Document list overlay detected{suffix}: '{desc}'. Waiting..."
                 )
             notified = True
             if time.time() - start > timeout:
@@ -1445,6 +1478,58 @@ class RDPApp(tk.Tk):
                 )
                 return
             time.sleep(0.5)
+
+    def _search_overlay_rel_box(self):
+        if not self.current_rect:
+            return None
+        point = self.cfg.get("search_point")
+        if not (isinstance(point, (list, tuple)) and len(point) == 2):
+            return None
+        left, top, right, bottom = self.current_rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        target_w = min(420, width)
+        target_h = min(220, height)
+        rel_w = target_w / width
+        rel_h = target_h / height
+        rel_left = max(0.0, min(point[0] - rel_w / 2, 1 - rel_w))
+        rel_top = max(0.0, min(point[1] - rel_h / 2, 1 - rel_h))
+        return [rel_left, rel_top, rel_w, rel_h]
+
+    def _wait_for_doc_search_ready(self, prefix="", timeout=10.0, reason=""):
+        rel_box = self._search_overlay_rel_box()
+        if not rel_box:
+            return
+        suffix = f" ({reason})" if reason else ""
+        start = time.time()
+        notified = False
+        while True:
+            img, scale = _grab_region_color_generic(
+                self.current_rect, rel_box, self.upscale_var.get()
+            )
+            df = do_ocr_data(
+                img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+            )
+            lines = lines_from_tsv(df, scale=scale)
+            overlay = self._find_doclist_overlay_text(lines)
+            if not overlay:
+                if notified:
+                    self.log_print(
+                        f"{prefix}Deal search overlay cleared{suffix}."
+                    )
+                return
+            if not notified:
+                desc = normalize_line(overlay) or overlay
+                self.log_print(
+                    f"{prefix}Deal search overlay detected{suffix}: '{desc}'. Waiting..."
+                )
+            notified = True
+            if time.time() - start > timeout:
+                self.log_print(
+                    f"{prefix}Timeout waiting for deal search overlay to clear{suffix}. Continuing."
+                )
+                return
+            time.sleep(0.4)
 
     def _type_pdf_search(self, query, prefix="", press_enter=True):
         if not self.current_rect:
@@ -1487,7 +1572,9 @@ class RDPApp(tk.Tk):
         self.log_print(f"{prefix}Clicking PDF result button at ({hx}, {hy}).")
         pyautogui.moveTo(hx, hy)
         pyautogui.click(hx, hy)
-        time.sleep(float(self.hitwait_var.get() or 1.0))
+        wait_seconds = float(self.hitwait_var.get() or 1.0)
+        if wait_seconds > 0 and not self._should_skip_manual_waits():
+            time.sleep(wait_seconds)
         return True
 
     def _click_pdf_close_button(self, prefix=""):
@@ -1566,7 +1653,9 @@ class RDPApp(tk.Tk):
                     f"{prefix}Unable to type PDF search term; continuing without re-search."
                 )
             else:
-                time.sleep(float(self.hitwait_var.get() or 1.0))
+                wait_seconds = float(self.hitwait_var.get() or 1.0)
+                if wait_seconds > 0 and not self._should_skip_manual_waits():
+                    time.sleep(wait_seconds)
 
         if not self._click_pdf_result_button(prefix=prefix):
             self.log_print(
@@ -1656,11 +1745,17 @@ class RDPApp(tk.Tk):
                 return
 
             queries = self._gather_aktenzeichen()
+            self.clear_simple_log()
             if not queries:
                 return
 
-            list_wait = float(self.cfg.get("post_search_wait", 1.2))
-            doc_wait = float(self.docwait_var.get() or 1.2)
+            skip_waits = self._should_skip_manual_waits()
+            list_wait = (
+                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            )
+            doc_wait = (
+                0.0 if skip_waits else float(self.docwait_var.get() or 1.2)
+            )
             results = []
             total = len(queries)
             for idx, (aktenzeichen, _row) in enumerate(queries, 1):
@@ -1674,15 +1769,22 @@ class RDPApp(tk.Tk):
                         f"[{idx}/{total}] Unable to type Aktenzeichen. Skipping entry."
                     )
                     continue
-                time.sleep(list_wait)
+                if list_wait > 0:
+                    time.sleep(list_wait)
                 self.log_print(
                     f"[{idx}/{total}] Typed '{aktenzeichen}' into the document search box."
+                )
+                self._wait_for_doc_search_ready(
+                    prefix=f"[{idx}/{total}] ", reason="after Aktenzeichen search"
                 )
                 self._wait_for_doclist_ready(
                     prefix=f"[{idx}/{total}] ", reason="after Aktenzeichen search"
                 )
 
                 term = self.streitwort_var.get().strip() or "Streitwert"
+                self._wait_for_doc_search_ready(
+                    prefix=f"[{idx}/{total}] ", reason="before PDF search"
+                )
                 if not self._type_pdf_search(
                     term, prefix=f"[{idx}/{total}] "
                 ):
@@ -1693,7 +1795,11 @@ class RDPApp(tk.Tk):
                 self.log_print(
                     f"[{idx}/{total}] Typed '{term}' into the PDF search box."
                 )
-                time.sleep(list_wait)
+                if list_wait > 0:
+                    time.sleep(list_wait)
+                self._wait_for_doc_search_ready(
+                    prefix=f"[{idx}/{total}] ", reason="after PDF search"
+                )
                 self._wait_for_doclist_ready(
                     prefix=f"[{idx}/{total}] ", reason="after PDF search"
                 )
@@ -1763,7 +1869,8 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] Clicked View button for the selected row."
                 )
 
-                time.sleep(doc_wait)
+                if doc_wait > 0:
+                    time.sleep(doc_wait)
                 amount = self._process_open_pdf(prefix=f"[{idx}/{total}] ")
                 results.append(
                     {
@@ -1771,6 +1878,9 @@ class RDPApp(tk.Tk):
                         "row_text": first["norm"],
                         "amount": amount or "",
                     }
+                )
+                self.simple_log_print(
+                    f"{aktenzeichen}: {amount or '(none)'}"
                 )
                 self.log_print(
                     f"[{idx}/{total}] {aktenzeichen} / {first['norm']} → {amount or '(none)'}"
@@ -1809,12 +1919,20 @@ class RDPApp(tk.Tk):
                 return
 
             term = self.streitwort_var.get() or "Streitwert"
-            list_wait = float(self.cfg.get("post_search_wait", 1.2))
+            skip_waits = self._should_skip_manual_waits()
+            list_wait = (
+                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            )
+            doc_wait = 0.0 if skip_waits else float(self.docwait_var.get() or 1.2)
             if not self._type_pdf_search(term, prefix="[Test] "):
                 self.log_print("[Test] Unable to type the Streitwert search term.")
                 return
             self.log_print(f"[Test] Typed '{term}' into the PDF search box.")
-            time.sleep(list_wait)
+            if list_wait > 0:
+                time.sleep(list_wait)
+            self._wait_for_doc_search_ready(
+                prefix="[Test] ", reason="after PDF search"
+            )
             self._wait_for_doclist_ready(prefix="[Test] ", reason="after PDF search")
 
             rx, ry, rw, rh = doc_rect
@@ -1868,7 +1986,8 @@ class RDPApp(tk.Tk):
                 return
 
             self.log_print("[Test] Clicked View button to open the PDF.")
-            time.sleep(float(self.docwait_var.get() or 1.2))
+            if doc_wait > 0:
+                time.sleep(doc_wait)
             amount = self._process_open_pdf(
                 prefix="[Test] ", search_term=term or "Streitwert"
             )
@@ -2021,6 +2140,28 @@ class RDPApp(tk.Tk):
         self.log.see(tk.END)
         self.update_idletasks()
 
+    def clear_simple_log(self):
+        if not hasattr(self, "simple_log"):
+            return
+        self.simple_log.configure(state="normal")
+        self.simple_log.delete("1.0", tk.END)
+        self.simple_log.configure(state="disabled")
+
+    def simple_log_print(self, text):
+        if not hasattr(self, "simple_log"):
+            return
+        self.simple_log.configure(state="normal")
+        self.simple_log.insert(tk.END, str(text) + "\n")
+        self.simple_log.see(tk.END)
+        self.simple_log.configure(state="disabled")
+        self.update_idletasks()
+
+    def _should_skip_manual_waits(self):
+        try:
+            return bool(self.skip_waits_var.get())
+        except Exception:
+            return False
+
     def pull_form_into_cfg(self):
         self.cfg["rdp_title_regex"] = self.rdp_var.get().strip()
         self.cfg["excel_path"] = self.xls_var.get().strip()
@@ -2077,6 +2218,9 @@ class RDPApp(tk.Tk):
         self.cfg["streitwert_results_csv"] = (
             self.streit_csv_var.get().strip() or "streitwert_results.csv"
         )
+        self.cfg["streitwert_overlay_skip_waits"] = bool(
+            self.skip_waits_var.get()
+        )
 
     def load_config(self):
         try:
@@ -2112,6 +2256,10 @@ class RDPApp(tk.Tk):
                     "streitwert_results_csv", "streitwert_results.csv"
                 )
             )
+            if hasattr(self, "skip_waits_var"):
+                self.skip_waits_var.set(
+                    self.cfg.get("streitwert_overlay_skip_waits", False)
+                )
             hits_pt = self.cfg.get("pdf_hits_point")
             if not (
                 isinstance(hits_pt, (list, tuple)) and len(hits_pt) == 2
