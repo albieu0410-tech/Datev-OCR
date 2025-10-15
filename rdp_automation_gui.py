@@ -1570,6 +1570,20 @@ class RDPApp(tk.Tk):
                     )
                     continue
                 time.sleep(list_wait)
+                self.log_print(
+                    f"[{idx}/{total}] Typed '{aktenzeichen}' into the document search box."
+                )
+
+                term = self.streitwort_var.get().strip() or "Streitwert"
+                if not self._type_doclist_query(term, prefix=f"[{idx}/{total}] "):
+                    self.log_print(
+                        f"[{idx}/{total}] Unable to type the Streitwert search term. Skipping entry."
+                    )
+                    continue
+                self.log_print(
+                    f"[{idx}/{total}] Typed '{term}' into the document search box."
+                )
+                time.sleep(list_wait)
 
                 rx, ry, rw, rh = doc_rect
                 focus_x = rx + max(5, rw // 40)
