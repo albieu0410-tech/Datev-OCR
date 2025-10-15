@@ -1552,6 +1552,13 @@ class RDPApp(tk.Tk):
                 return
 
             term = self.streitwort_var.get() or "Streitwert"
+            list_wait = float(self.cfg.get("post_search_wait", 1.2))
+            if not self._type_doclist_query(term):
+                self.log_print("[Test] Unable to type the Streitwert search term.")
+                return
+            self.log_print(f"[Test] Typed '{term}' into the document search box.")
+            time.sleep(list_wait)
+
             rx, ry, rw, rh = doc_rect
             pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
             time.sleep(0.2)
