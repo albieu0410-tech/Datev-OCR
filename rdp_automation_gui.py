@@ -330,6 +330,7 @@ class RDPApp(tk.Tk):
         self.current_rect = None
         self.ocr_preview_imgtk = None
         self._current_profile_sub_region = None
+        self.capture_countdown_seconds = 3
 
         self.create_widgets()
 
@@ -577,6 +578,12 @@ class RDPApp(tk.Tk):
 
         ttk.Button(
             streit_frame,
+            text="Test Streitwert Setup",
+            command=self.test_streitwert_setup,
+        ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(
+            streit_frame,
             text="Run Streitwert Scan",
             command=self.run_streitwert_threaded,
         ).pack(anchor="w", pady=(6, 0))
@@ -726,19 +733,56 @@ class RDPApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Connect RDP", f"Failed: {e}")
 
+    def _show_capture_countdown(self, seconds=None, message="Capturing in {n}…"):
+        secs = int(seconds if seconds is not None else self.capture_countdown_seconds)
+        if secs <= 0:
+            return
+        try:
+            top = tk.Toplevel(self)
+        except tk.TclError:
+            time.sleep(secs)
+            return
+
+        top.title("Countdown")
+        top.transient(self)
+        top.attributes("-topmost", True)
+        try:
+            x = self.winfo_rootx() + 120
+            y = self.winfo_rooty() + 120
+            top.geometry(f"200x90+{x}+{y}")
+        except Exception:
+            top.geometry("200x90")
+
+        label = ttk.Label(top, text="", padding=16, anchor="center")
+        label.pack(fill=tk.BOTH, expand=True)
+        top.update()
+
+        try:
+            for remaining in range(secs, 0, -1):
+                label.configure(text=message.format(n=remaining))
+                top.update()
+                time.sleep(1)
+        finally:
+            try:
+                top.destroy()
+            except tk.TclError:
+                pass
+
+    def _prompt_and_capture_point(self, title, prompt, seconds=None):
+        msg = f"{prompt}\n\nCountdown starts after you click OK."
+        messagebox.showinfo(title, msg)
+        self._show_capture_countdown(seconds=seconds)
+        return pyautogui.position()
+
     def pick_search_point(self):
         if not self.current_rect:
             self.connect_rdp()
             if not self.current_rect:
                 return
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
-        messagebox.showinfo(
-            "Pick Search Point",
-            "Position your mouse over the search bar location.\nWaiting 3 seconds after you click OK...",
+        x, y = self._prompt_and_capture_point(
+            "Pick Search Point", "Position your mouse over the search bar location."
         )
-        self.update()
-        time.sleep(3)
-        x, y = pyautogui.position()
         rel = abs_to_rel(self.current_rect, abs_point=(x, y))
         self.cfg["search_point"] = rel
         self.sp_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
@@ -750,21 +794,13 @@ class RDPApp(tk.Tk):
             if not self.current_rect:
                 return
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
-        messagebox.showinfo(
-            "Pick Result Region",
-            "Position your mouse over the TOP-LEFT corner of the region.\nWaiting 3 seconds after you click OK...",
+        x1, y1 = self._prompt_and_capture_point(
+            "Pick Result Region", "Position your mouse over the TOP-LEFT corner of the region."
         )
-        self.update()
-        time.sleep(3)
-        x1, y1 = pyautogui.position()
 
-        messagebox.showinfo(
-            "Pick Result Region",
-            "Now position your mouse over the BOTTOM-RIGHT corner.\nWaiting 3 seconds after you click OK...",
+        x2, y2 = self._prompt_and_capture_point(
+            "Pick Result Region", "Now position your mouse over the BOTTOM-RIGHT corner."
         )
-        self.update()
-        time.sleep(3)
-        x2, y2 = pyautogui.position()
         left, top = min(x1, x2), min(y1, y2)
         width, height = abs(x2 - x1), abs(y2 - y1)
         rel_box = abs_to_rel(self.current_rect, abs_box=(left, top, width, height))
@@ -780,10 +816,8 @@ class RDPApp(tk.Tk):
             if not self.current_rect:
                 return None
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
-        messagebox.showinfo("Pick", msg1)
-        x1, y1 = pyautogui.position()
-        messagebox.showinfo("Pick", msg2)
-        x2, y2 = pyautogui.position()
+        x1, y1 = self._prompt_and_capture_point("Pick", msg1)
+        x2, y2 = self._prompt_and_capture_point("Pick", msg2)
         left, top = min(x1, x2), min(y1, y2)
         width, height = abs(x2 - x1), abs(y2 - y1)
         return abs_to_rel(
@@ -823,10 +857,9 @@ class RDPApp(tk.Tk):
             if not self.current_rect:
                 return
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
-        messagebox.showinfo(
-            "Pick", "Hover the PDF search box caret position, then OK."
+        x, y = self._prompt_and_capture_point(
+            "Pick", "Hover the PDF search box caret position, then confirm."
         )
-        x, y = pyautogui.position()
         rel = abs_to_rel(self.current_rect, abs_point=(x, y))
         self.cfg["pdf_search_point"] = rel
         self.log_print(f"PDF search point set: {rel}")
@@ -848,20 +881,14 @@ class RDPApp(tk.Tk):
         outer_abs = (rx, ry, rx + rw, ry + rh)
 
         Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
-        messagebox.showinfo(
+        x1, y1 = self._prompt_and_capture_point(
             "Pick Amount Region",
-            "Place your mouse at the TOP-LEFT of the amount area inside the Result Region.\nWaiting 3 seconds...",
+            "Place your mouse at the TOP-LEFT of the amount area inside the Result Region.",
         )
-        self.update()
-        time.sleep(3)
-        x1, y1 = pyautogui.position()
 
-        messagebox.showinfo(
-            "Pick Amount Region", "Now the BOTTOM-RIGHT.\nWaiting 3 seconds..."
+        x2, y2 = self._prompt_and_capture_point(
+            "Pick Amount Region", "Now move to the BOTTOM-RIGHT corner."
         )
-        self.update()
-        time.sleep(3)
-        x2, y2 = pyautogui.position()
 
         # Clamp to outer region and convert to sub-relative
         left, top = max(min(x1, x2), outer_abs[0]), max(min(y1, y2), outer_abs[1])
@@ -1090,6 +1117,41 @@ class RDPApp(tk.Tk):
         t = threading.Thread(target=self.run_streitwert, daemon=True)
         t.start()
 
+    def _filter_streitwert_rows(self, lines):
+        inc = [
+            t.strip().lower()
+            for t in (self.includes_var.get() or "").split(",")
+            if t.strip()
+        ]
+        exc = [
+            t.strip().lower()
+            for t in (self.excludes_var.get() or "").split(",")
+            if t.strip()
+        ]
+        excl_k = bool(self.exclude_k_var.get())
+
+        matches = []
+        debug_rows = []
+        for x, y, w, h, txt in lines:
+            raw = (txt or "").strip()
+            if not raw:
+                continue
+            norm = normalize_line(raw)
+            low_raw = raw.lower()
+            low_norm = norm.lower()
+            if excl_k and re.match(r"^\s*k", low_raw):
+                debug_rows.append((raw, "excluded prefix 'K'"))
+                continue
+            if exc and any(tok in low_raw or tok in low_norm for tok in exc):
+                debug_rows.append((raw, "matched exclude token"))
+                continue
+            if inc and not any(tok in low_raw or tok in low_norm for tok in inc):
+                debug_rows.append((raw, "missing include token"))
+                continue
+            matches.append((norm, x, y, w, h, raw))
+
+        return matches, inc, exc, debug_rows
+
     def run_streitwert(self):
         try:
             self.pull_form_into_cfg()
@@ -1114,38 +1176,38 @@ class RDPApp(tk.Tk):
             )
             lines = lines_from_tsv(df)  # (x,y,w,h,text)
 
-            inc = [
-                t.strip().lower()
-                for t in (self.includes_var.get() or "").split(",")
-                if t.strip()
-            ]
-            exc = [
-                t.strip().lower()
-                for t in (self.excludes_var.get() or "").split(",")
-                if t.strip()
-            ]
-            excl_k = bool(self.exclude_k_var.get())
-
             rx, ry, rw, rh = rel_to_abs(
                 self.current_rect, self.cfg["doclist_region"]
             )
-            to_open = []
-            for x, y, w, h, txt in lines:
-                norm = normalize_line(txt)
-                low = norm.lower()
-                if excl_k and re.match(r"\s*k", low):
-                    continue
-                if any(tok in low for tok in exc):
-                    continue
-                if any(tok in low for tok in inc):
-                    to_open.append((norm, x, y, w, h))
+            to_open, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
 
+            self.log_print(
+                f"Doc list OCR produced {len(lines)} lines; matched {len(to_open)} rows."
+            )
             if not to_open:
-                self.log_print("No rows matched include filters.")
+                if not lines:
+                    self.log_print("No OCR lines detected in document list region.")
+                else:
+                    preview = ", ".join(
+                        f"{reason}: {raw}" for raw, reason in debug_rows[:5]
+                    )
+                    if preview:
+                        self.log_print(
+                            "First OCR rows (with reasons): " + preview
+                        )
+                    else:
+                        sample = ", ".join((txt or "").strip() for *_, txt in lines[:5])
+                        if sample:
+                            self.log_print(
+                                "First OCR rows: " + sample
+                            )
+                self.log_print(
+                    "No rows matched include filters. Adjust tokens or verify OCR via the test button."
+                )
                 return
 
             results = []
-            for i, (norm, x, y, w, h) in enumerate(to_open, 1):
+            for i, (norm, x, y, w, h, raw_txt) in enumerate(to_open, 1):
                 cx = rx + max(10, x + 15)
                 cy = ry + y + h // 2
                 pyautogui.doubleClick(cx, cy)
@@ -1235,6 +1297,77 @@ class RDPApp(tk.Tk):
 
         except Exception as e:
             self.log_print("ERROR: " + repr(e))
+
+    def test_streitwert_setup(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            doc_img = _grab_region_color_generic(
+                self.current_rect,
+                self.cfg["doclist_region"],
+                self.upscale_var.get(),
+            )
+            df = do_ocr_data(
+                doc_img,
+                lang=self.lang_var.get().strip() or "deu+eng",
+                psm=6,
+            )
+            lines = lines_from_tsv(df)
+            matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
+
+            self.log_print(
+                f"[Test] Doc list OCR lines: {len(lines)} | includes: {inc or ['(none)']} | excludes: {exc or ['(none)']}"
+            )
+            if matches:
+                for norm, _, _, _, _, raw in matches[:5]:
+                    self.log_print(f"  MATCH → {raw}")
+            else:
+                preview = debug_rows[:5] or [(raw, "") for *_, raw in lines[:5]]
+                for raw, reason in preview:
+                    desc = f"  {reason or 'OCR'} → {raw}"
+                    self.log_print(desc)
+
+            try:
+                sx, sy = rel_to_abs(
+                    self.current_rect, self.cfg["pdf_search_point"]
+                )
+                self.log_print(
+                    f"[Test] PDF search point absolute position: ({sx}, {sy})"
+                )
+            except Exception:
+                self.log_print("[Test] PDF search point not configured.")
+
+            try:
+                hx, hy, hw, hh = rel_to_abs(
+                    self.current_rect, self.cfg["pdf_hits_region"]
+                )
+                self.log_print(
+                    f"[Test] PDF hits region abs: x={hx}, y={hy}, w={hw}, h={hh}"
+                )
+            except Exception:
+                self.log_print("[Test] PDF hits region not configured.")
+
+            try:
+                tx, ty, tw, th = rel_to_abs(
+                    self.current_rect, self.cfg["pdf_text_region"]
+                )
+                self.log_print(
+                    f"[Test] PDF text region abs: x={tx}, y={ty}, w={tw}, h={th}"
+                )
+            except Exception:
+                self.log_print("[Test] PDF text region not configured.")
+
+            self.log_print("[Test] Streitwert setup check finished.")
+
+        except Exception as e:
+            self.log_print("ERROR during Streitwert test: " + repr(e))
 
     # ---------- Utilities ----------
     def show_preview(self, img: Image.Image):
