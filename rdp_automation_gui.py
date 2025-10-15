@@ -334,20 +334,36 @@ class RDPApp(tk.Tk):
         self.create_widgets()
 
     def create_widgets(self):
-        # --- Left frame (controls) ---
-        left = ttk.Frame(self, padding=10)
-        left.pack(side=tk.LEFT, fill=tk.Y)
+        # --- Left frame with notebook sections ---
+        left_container = ttk.Frame(self, padding=10)
+        left_container.pack(side=tk.LEFT, fill=tk.Y)
 
-        # RDP
-        ttk.Label(left, text="RDP Window Title (Regex)").pack(anchor="w")
+        notebook = ttk.Notebook(left_container)
+        notebook.pack(fill=tk.BOTH, expand=True)
+
+        general_tab = ttk.Frame(notebook)
+        calibration_tab = ttk.Frame(notebook)
+        streit_tab = ttk.Frame(notebook)
+        ocr_tab = ttk.Frame(notebook)
+
+        notebook.add(general_tab, text="General")
+        notebook.add(calibration_tab, text="Calibration")
+        notebook.add(streit_tab, text="Streitwert")
+        notebook.add(ocr_tab, text="OCR / Profiles")
+
+        # --- General tab: RDP, Excel, timing ---
+        rdp_frame = ttk.LabelFrame(general_tab, text="RDP Connection")
+        rdp_frame.pack(fill=tk.X, pady=4)
+        ttk.Label(rdp_frame, text="RDP Window Title (Regex)").pack(anchor="w")
         self.rdp_var = tk.StringVar(value=self.cfg["rdp_title_regex"])
-        ttk.Entry(left, textvariable=self.rdp_var, width=52).pack(
+        ttk.Entry(rdp_frame, textvariable=self.rdp_var, width=52).pack(
             anchor="w", pady=(0, 6)
         )
 
-        # Excel path
-        ttk.Label(left, text="Excel Path").pack(anchor="w")
-        xframe = ttk.Frame(left)
+        excel_frame = ttk.LabelFrame(general_tab, text="Excel Source")
+        excel_frame.pack(fill=tk.X, pady=4)
+        ttk.Label(excel_frame, text="Excel Path").pack(anchor="w")
+        xframe = ttk.Frame(excel_frame)
         xframe.pack(anchor="w", fill=tk.X)
         self.xls_var = tk.StringVar(value=self.cfg["excel_path"])
         ttk.Entry(xframe, textvariable=self.xls_var, width=42).pack(
@@ -357,8 +373,7 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
-        # Sheet / Start cell / Max rows
-        row1 = ttk.Frame(left)
+        row1 = ttk.Frame(excel_frame)
         row1.pack(anchor="w", pady=(6, 0))
         ttk.Label(row1, text="Sheet").pack(side=tk.LEFT)
         self.sheet_var = tk.StringVar(value=str(self.cfg["excel_sheet"]))
@@ -376,25 +391,24 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
-        # Fallback input column (if start cell is empty)
-        ttk.Label(left, text="(Optional) Input column name (if Start cell empty)").pack(
+        ttk.Label(excel_frame, text="(Optional) Input column name (if Start cell empty)").pack(
             anchor="w", pady=(6, 0)
         )
         self.col_var = tk.StringVar(value=self.cfg["input_column"])
-        ttk.Entry(left, textvariable=self.col_var, width=20).pack(
+        ttk.Entry(excel_frame, textvariable=self.col_var, width=20).pack(
             anchor="w", pady=(0, 6)
         )
 
-        # Results CSV
-        ttk.Label(left, text="Results CSV").pack(anchor="w")
+        ttk.Label(excel_frame, text="Results CSV").pack(anchor="w")
         self.csv_var = tk.StringVar(value=self.cfg["results_csv"])
-        ttk.Entry(left, textvariable=self.csv_var, width=42).pack(
+        ttk.Entry(excel_frame, textvariable=self.csv_var, width=42).pack(
             anchor="w", pady=(0, 6)
         )
 
-        # Tesseract path + lang
-        ttk.Label(left, text="Tesseract Path (exe or folder)").pack(anchor="w")
-        tframe = ttk.Frame(left)
+        tess_frame = ttk.LabelFrame(general_tab, text="Tesseract")
+        tess_frame.pack(fill=tk.X, pady=4)
+        ttk.Label(tess_frame, text="Tesseract Path (exe or folder)").pack(anchor="w")
+        tframe = ttk.Frame(tess_frame)
         tframe.pack(anchor="w", fill=tk.X)
         self.tess_var = tk.StringVar(value=self.cfg["tesseract_path"])
         ttk.Entry(tframe, textvariable=self.tess_var, width=42).pack(
@@ -403,32 +417,29 @@ class RDPApp(tk.Tk):
         ttk.Button(tframe, text="Browse", command=self.browse_tesseract).pack(
             side=tk.LEFT, padx=6
         )
-
-        ttk.Label(left, text="OCR language (e.g., deu+eng)").pack(
+        ttk.Label(tess_frame, text="OCR language (e.g., deu+eng)").pack(
             anchor="w", pady=(6, 0)
         )
         self.lang_var = tk.StringVar(value=self.cfg.get("tesseract_lang", "deu+eng"))
-        ttk.Entry(left, textvariable=self.lang_var, width=16).pack(
+        ttk.Entry(tess_frame, textvariable=self.lang_var, width=16).pack(
             anchor="w", pady=(0, 6)
         )
 
-        ttk.Separator(left).pack(fill=tk.X, pady=8)
-
-        # Timing
-        r1 = ttk.Frame(left)
+        timing_frame = ttk.LabelFrame(general_tab, text="Timing & Typing")
+        timing_frame.pack(fill=tk.X, pady=4)
+        r1 = ttk.Frame(timing_frame)
         r1.pack(anchor="w")
         ttk.Label(r1, text="Typing delay (sec/char)").pack(side=tk.LEFT)
         self.type_var = tk.StringVar(value=str(self.cfg["type_delay"]))
         ttk.Entry(r1, textvariable=self.type_var, width=8).pack(side=tk.LEFT, padx=6)
 
-        r2 = ttk.Frame(left)
+        r2 = ttk.Frame(timing_frame)
         r2.pack(anchor="w", pady=(4, 0))
         ttk.Label(r2, text="Post-search wait (sec)").pack(side=tk.LEFT)
         self.wait_var = tk.StringVar(value=str(self.cfg["post_search_wait"]))
         ttk.Entry(r2, textvariable=self.wait_var, width=8).pack(side=tk.LEFT, padx=6)
 
-        # Typing test
-        r3 = ttk.Frame(left)
+        r3 = ttk.Frame(timing_frame)
         r3.pack(anchor="w", pady=(6, 0))
         ttk.Label(r3, text="Typing test text").pack(side=tk.LEFT)
         self.typing_test_var = tk.StringVar(
@@ -441,12 +452,11 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=4
         )
 
-        ttk.Separator(left).pack(fill=tk.X, pady=8)
-
-        # Calibration
-        ttk.Label(left, text="Calibration").pack(anchor="w")
-        cframe = ttk.Frame(left)
-        cframe.pack(anchor="w")
+        # --- Calibration tab ---
+        cal_frame = ttk.LabelFrame(calibration_tab, text="RDP Calibration")
+        cal_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+        cframe = ttk.Frame(cal_frame)
+        cframe.pack(anchor="w", pady=(0, 4))
         ttk.Button(cframe, text="Connect RDP", command=self.connect_rdp).pack(
             side=tk.LEFT, padx=2
         )
@@ -457,27 +467,27 @@ class RDPApp(tk.Tk):
             cframe, text="Pick Result Region", command=self.pick_result_region
         ).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(left, text="Search Point (x%, y%)").pack(anchor="w", pady=(8, 0))
+        ttk.Label(cal_frame, text="Search Point (x%, y%)").pack(anchor="w", pady=(4, 0))
         self.sp_var = tk.StringVar(
             value=f"{self.cfg['search_point'][0]:.3f}, {self.cfg['search_point'][1]:.3f}"
         )
-        ttk.Entry(left, textvariable=self.sp_var, width=30).pack(anchor="w")
+        ttk.Entry(cal_frame, textvariable=self.sp_var, width=30).pack(anchor="w")
 
-        ttk.Label(left, text="Result Region (l%, t%, w%, h%)").pack(
-            anchor="w", pady=(8, 0)
+        ttk.Label(cal_frame, text="Result Region (l%, t%, w%, h%)").pack(
+            anchor="w", pady=(6, 0)
         )
         rr = self.cfg["result_region"]
         self.rr_var = tk.StringVar(
             value=f"{rr[0]:.3f}, {rr[1]:.3f}, {rr[2]:.3f}, {rr[3]:.3f}"
         )
-        ttk.Entry(left, textvariable=self.rr_var, width=40).pack(anchor="w")
+        ttk.Entry(cal_frame, textvariable=self.rr_var, width=40).pack(anchor="w")
 
-        # --- Streitwert workflow calibration (NEW) ---
-        ttk.Separator(left).pack(fill=tk.X, pady=8)
-        ttk.Label(left, text="Streitwert workflow").pack(anchor="w")
+        # --- Streitwert tab ---
+        streit_frame = ttk.LabelFrame(streit_tab, text="Calibration & Filters")
+        streit_frame.pack(fill=tk.BOTH, expand=True, pady=4)
 
-        cal = ttk.Frame(left)
-        cal.pack(anchor="w", pady=(2, 0))
+        cal = ttk.Frame(streit_frame)
+        cal.pack(anchor="w", pady=(0, 2))
         ttk.Button(
             cal,
             text="Pick Doc List Region",
@@ -489,8 +499,8 @@ class RDPApp(tk.Tk):
             command=self.pick_pdf_search_point,
         ).pack(side=tk.LEFT, padx=2)
 
-        cal2 = ttk.Frame(left)
-        cal2.pack(anchor="w", pady=(2, 0))
+        cal2 = ttk.Frame(streit_frame)
+        cal2.pack(anchor="w", pady=(0, 2))
         ttk.Button(
             cal2,
             text="Pick PDF Results Region",
@@ -502,32 +512,36 @@ class RDPApp(tk.Tk):
             command=self.pick_pdf_text_region,
         ).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(left, text="Include tokens (comma-separated)").pack(
+        ttk.Label(streit_frame, text="Include tokens (comma-separated)").pack(
             anchor="w", pady=(6, 0)
         )
         self.includes_var = tk.StringVar(
             value=self.cfg.get("includes", "Urt,SWB,SW")
         )
-        ttk.Entry(left, textvariable=self.includes_var, width=40).pack(anchor="w")
+        ttk.Entry(streit_frame, textvariable=self.includes_var, width=40).pack(
+            anchor="w"
+        )
 
-        ttk.Label(left, text="Exclude tokens (comma-separated)").pack(
+        ttk.Label(streit_frame, text="Exclude tokens (comma-separated)").pack(
             anchor="w", pady=(6, 0)
         )
         self.excludes_var = tk.StringVar(
             value=self.cfg.get("excludes", "SaM,KLE")
         )
-        ttk.Entry(left, textvariable=self.excludes_var, width=40).pack(anchor="w")
+        ttk.Entry(streit_frame, textvariable=self.excludes_var, width=40).pack(
+            anchor="w"
+        )
 
         self.exclude_k_var = tk.BooleanVar(
             value=self.cfg.get("exclude_prefix_k", True)
         )
         ttk.Checkbutton(
-            left,
+            streit_frame,
             text="Exclude rows starting with 'K'",
             variable=self.exclude_k_var,
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(6, 0))
 
-        row3 = ttk.Frame(left)
+        row3 = ttk.Frame(streit_frame)
         row3.pack(anchor="w", pady=(6, 0))
         ttk.Label(row3, text="PDF search term").pack(side=tk.LEFT)
         self.streitwort_var = tk.StringVar(
@@ -551,23 +565,27 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
-        ttk.Label(left, text="Streitwert CSV").pack(anchor="w", pady=(6, 0))
+        ttk.Label(streit_frame, text="Streitwert CSV").pack(anchor="w", pady=(6, 0))
         self.streit_csv_var = tk.StringVar(
             value=self.cfg.get(
                 "streitwert_results_csv", "streitwert_results.csv"
             )
         )
-        ttk.Entry(left, textvariable=self.streit_csv_var, width=40).pack(
+        ttk.Entry(streit_frame, textvariable=self.streit_csv_var, width=40).pack(
             anchor="w", pady=(0, 4)
         )
 
         ttk.Button(
-            left, text="Run Streitwert Scan", command=self.run_streitwert_threaded
+            streit_frame,
+            text="Run Streitwert Scan",
+            command=self.run_streitwert_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
-        # OCR options & full-region parsing
-        rowb = ttk.Frame(left)
-        rowb.pack(anchor="w", pady=(6, 0))
+        # --- OCR / Profiles tab ---
+        ocr_options = ttk.LabelFrame(ocr_tab, text="OCR Options")
+        ocr_options.pack(fill=tk.X, pady=4)
+        rowb = ttk.Frame(ocr_options)
+        rowb.pack(anchor="w", pady=(0, 4))
         ttk.Label(rowb, text="Upscale ×").pack(side=tk.LEFT)
         self.upscale_var = tk.StringVar(value=str(self.cfg.get("upscale_x", 4)))
         ttk.Entry(rowb, textvariable=self.upscale_var, width=5).pack(
@@ -578,8 +596,8 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
-        fr = ttk.Frame(left)
-        fr.pack(anchor="w", pady=(8, 0))
+        fr = ttk.Frame(ocr_options)
+        fr.pack(anchor="w", pady=(4, 0))
         self.fullparse_var = tk.BooleanVar(
             value=self.cfg.get("use_full_region_parse", True)
         )
@@ -590,23 +608,21 @@ class RDPApp(tk.Tk):
         self.keyword_var = tk.StringVar(value=self.cfg.get("keyword", "Honorar"))
         ttk.Entry(fr, textvariable=self.keyword_var, width=16).pack(side=tk.LEFT)
 
-        nr = ttk.Frame(left)
-        nr.pack(anchor="w", pady=(6, 0))
+        nr = ttk.Frame(ocr_options)
+        nr.pack(anchor="w", pady=(4, 0))
         self.normalize_var = tk.BooleanVar(value=self.cfg.get("normalize_ocr", True))
         ttk.Checkbutton(
             nr, text="Normalize OCR (O→0, S→5…)", variable=self.normalize_var
         ).pack(side=tk.LEFT)
 
         ttk.Button(
-            left, text="Test Parse (full region)", command=self.test_parse_full
-        ).pack(anchor="w", pady=(8, 0))
+            ocr_options, text="Test Parse (full region)", command=self.test_parse_full
+        ).pack(anchor="w", pady=(6, 0))
 
-        # ---------------- Amount Region Profiles (NEW) ----------------
-        ttk.Separator(left).pack(fill=tk.X, pady=10)
-        ttk.Label(left, text="Amount Region Profiles").pack(anchor="w")
-
-        prof_row1 = ttk.Frame(left)
-        prof_row1.pack(anchor="w", pady=(4, 0))
+        profile_frame = ttk.LabelFrame(ocr_tab, text="Amount Region Profiles")
+        profile_frame.pack(fill=tk.BOTH, expand=True, pady=6)
+        prof_row1 = ttk.Frame(profile_frame)
+        prof_row1.pack(anchor="w", pady=(0, 4))
         ttk.Label(prof_row1, text="Active").pack(side=tk.LEFT)
         self.profile_names = [p["name"] for p in self.cfg.get("amount_profiles", [])]
         self.profile_var = tk.StringVar(value=self.cfg.get("active_amount_profile", ""))
@@ -626,8 +642,8 @@ class RDPApp(tk.Tk):
             prof_row1, text="Use profile region", variable=self.use_profile_var
         ).pack(side=tk.LEFT)
 
-        prof_row2 = ttk.Frame(left)
-        prof_row2.pack(anchor="w", pady=(6, 0))
+        prof_row2 = ttk.Frame(profile_frame)
+        prof_row2.pack(anchor="w", pady=(0, 4))
         ttk.Label(prof_row2, text="Name").pack(side=tk.LEFT)
         self.new_prof_name_var = tk.StringVar(
             value=self.cfg.get("active_amount_profile", "")
@@ -642,8 +658,8 @@ class RDPApp(tk.Tk):
             side=tk.LEFT, padx=6
         )
 
-        prof_row3 = ttk.Frame(left)
-        prof_row3.pack(anchor="w", pady=(6, 0))
+        prof_row3 = ttk.Frame(profile_frame)
+        prof_row3.pack(anchor="w", pady=(0, 4))
         ttk.Button(
             prof_row3, text="Pick Amount Region", command=self.pick_amount_region
         ).pack(side=tk.LEFT, padx=2)
@@ -657,19 +673,17 @@ class RDPApp(tk.Tk):
             prof_row3, text="Test Parse (profile)", command=self.test_parse_profile
         ).pack(side=tk.LEFT, padx=2)
 
-        # Save/Load + Run
-        tframe2 = ttk.Frame(left)
-        tframe2.pack(anchor="w", pady=8)
-        ttk.Button(tframe2, text="Save Config", command=self.save_config).pack(
+        # --- Footer actions below notebook ---
+        actions = ttk.Frame(left_container)
+        actions.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(actions, text="Save Config", command=self.save_config).pack(
             side=tk.LEFT, padx=2
         )
-        ttk.Button(tframe2, text="Load Config", command=self.load_config).pack(
+        ttk.Button(actions, text="Load Config", command=self.load_config).pack(
             side=tk.LEFT, padx=2
         )
-
-        ttk.Separator(left).pack(fill=tk.X, pady=8)
-        ttk.Button(left, text="Run Batch", command=self.run_batch_threaded).pack(
-            anchor="w", pady=(0, 6)
+        ttk.Button(actions, text="Run Batch", command=self.run_batch_threaded).pack(
+            side=tk.RIGHT, padx=2
         )
 
         # --- Right frame (preview + log) ---
@@ -679,8 +693,13 @@ class RDPApp(tk.Tk):
         self.img_label = ttk.Label(right)
         self.img_label.pack(anchor="w", pady=(0, 6))
         ttk.Label(right, text="Log").pack(anchor="w")
-        self.log = tk.Text(right, height=22)
-        self.log.pack(fill=tk.BOTH, expand=True)
+        log_frame = ttk.Frame(right)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.log = tk.Text(log_frame, height=14, wrap="word")
+        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log.configure(yscrollcommand=log_scroll.set)
 
         # Load active profile details into fields
         self._refresh_profile_fields_from_active()
