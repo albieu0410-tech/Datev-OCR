@@ -53,7 +53,7 @@ DEFAULTS = {
     # --- Streitwert workflow (NEW) ---
     "doclist_region": [0.10, 0.24, 0.78, 0.50],  # list/table area with documents
     "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
-    "pdf_hits_region": [0.02, 0.22, 0.18, 0.60],  # left panel with search hits
+    "pdf_hits_point": [0.08, 0.32],  # button inside the PDF hits pane
     "pdf_text_region": [0.20, 0.18, 0.74, 0.68],  # main page text area
     "includes": "Urt,SWB,SW",  # rows to include if they contain any of these
     "excludes": "SaM,KLE",  # rows to skip if they contain any of these
@@ -527,19 +527,35 @@ class RDPApp(tk.Tk):
         cal2.pack(anchor="w", pady=(0, 2))
         ttk.Button(
             cal2,
-            text="Pick PDF Results Region",
-            command=self.pick_pdf_hits_region,
+            text="Pick PDF Results Button",
+            command=self.pick_pdf_hits_point,
         ).pack(side=tk.LEFT, padx=2)
-        ttk.Button(
+        hits_pt = self.cfg.get("pdf_hits_point")
+        hits_txt = (
+            f"{hits_pt[0]:.3f}, {hits_pt[1]:.3f}"
+            if isinstance(hits_pt, (list, tuple)) and len(hits_pt) == 2
+            else ""
+        )
+        self.pdf_hits_var = tk.StringVar(value=hits_txt)
+        ttk.Entry(
             cal2,
-            text="Pick PDF Text Region",
-            command=self.pick_pdf_text_region,
-        ).pack(side=tk.LEFT, padx=2)
+            textvariable=self.pdf_hits_var,
+            width=20,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=4)
 
         cal3 = ttk.Frame(streit_frame)
         cal3.pack(anchor="w", pady=(0, 2))
         ttk.Button(
             cal3,
+            text="Pick PDF Text Region",
+            command=self.pick_pdf_text_region,
+        ).pack(side=tk.LEFT, padx=2)
+
+        cal4 = ttk.Frame(streit_frame)
+        cal4.pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            cal4,
             text="Pick View Button",
             command=self.pick_doc_view_point,
         ).pack(side=tk.LEFT, padx=2)
@@ -551,7 +567,7 @@ class RDPApp(tk.Tk):
         )
         self.doc_view_var = tk.StringVar(value=view_txt)
         ttk.Entry(
-            cal3,
+            cal4,
             textvariable=self.doc_view_var,
             width=20,
             state="readonly",
@@ -880,14 +896,21 @@ class RDPApp(tk.Tk):
             self.cfg["doclist_region"] = rb
             self.log_print(f"Doc list region set: {rb}")
 
-    def pick_pdf_hits_region(self):
-        rb = self._two_click_box(
-            "Hover TOP-LEFT of the PDF search hits panel, then OK.",
-            "Hover BOTTOM-RIGHT of the PDF hits panel, then OK.",
+    def pick_pdf_hits_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        x, y = self._prompt_and_capture_point(
+            "Pick",
+            "Hover the PDF results button you want to click (top match), then confirm.",
         )
-        if rb:
-            self.cfg["pdf_hits_region"] = rb
-            self.log_print(f"PDF hits region set: {rb}")
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["pdf_hits_point"] = rel
+        if hasattr(self, "pdf_hits_var"):
+            self.pdf_hits_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
+        self.log_print(f"PDF hits button point set: {rel}")
 
     def pick_pdf_text_region(self):
         rb = self._two_click_box(
@@ -1317,6 +1340,25 @@ class RDPApp(tk.Tk):
         time.sleep(0.1)
         return True
 
+    def _click_pdf_result_button(self, prefix=""):
+        if not self.current_rect:
+            return False
+        point = self.cfg.get("pdf_hits_point")
+        if not (isinstance(point, (list, tuple)) and len(point) == 2):
+            msg = "PDF results button point is not configured. Please calibrate it."
+            self.log_print(f"{prefix}{msg}" if prefix else msg)
+            return False
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+        hx, hy = rel_to_abs(self.current_rect, point)
+        self.log_print(f"{prefix}Clicking PDF result button at ({hx}, {hy}).")
+        pyautogui.moveTo(hx, hy)
+        pyautogui.click(hx, hy)
+        time.sleep(float(self.hitwait_var.get() or 1.0))
+        return True
+
     def _type_doclist_query(self, query, press_enter=True, prefix=""):
         if not self.current_rect:
             return False
@@ -1358,43 +1400,10 @@ class RDPApp(tk.Tk):
         except Exception:
             pass
 
-        hits_img, hits_scale = _grab_region_color_generic(
-            self.current_rect,
-            self.cfg["pdf_hits_region"],
-            self.upscale_var.get(),
-        )
-        dfh = do_ocr_data(
-            hits_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
-        )
-        hits = lines_from_tsv(dfh, scale=hits_scale)
-        self.log_print(f"{prefix}PDF hits OCR rows: {len(hits)}.")
-
-        if hits:
-            xh, yh, wh, hh, text = hits[0]
-            rxh, ryh, rw, rh = rel_to_abs(
-                self.current_rect, self.cfg["pdf_hits_region"]
-            )
-
-            local_x = xh + max(10, min(wh // 2, max(wh - 10, 10)))
-            local_y = yh + max(10, min(hh // 2, max(hh - 10, 10)))
-            click_x = rxh + min(max(5, local_x), max(rw - 5, 5))
-            click_y = ryh + min(max(5, local_y), max(rh - 5, 5))
+        if not self._click_pdf_result_button(prefix=prefix):
             self.log_print(
-                f"{prefix}Clicking first PDF hit at ({click_x}, {click_y}) text: {text}."
+                f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
             )
-            pyautogui.moveTo(click_x, click_y)
-            pyautogui.click(click_x, click_y)
-            time.sleep(float(self.hitwait_var.get() or 1.0))
-        else:
-            rxh, ryh, _, _ = rel_to_abs(
-                self.current_rect, self.cfg["pdf_hits_region"]
-            )
-            self.log_print(
-                f"{prefix}No PDF hits detected; clicking default position to focus pane."
-            )
-            pyautogui.click(rxh + 20, ryh + 30)
-            time.sleep(float(self.hitwait_var.get() or 1.0))
-
         page_img, page_scale = _grab_region_color_generic(
             self.current_rect,
             self.cfg["pdf_text_region"],
@@ -1750,27 +1759,64 @@ class RDPApp(tk.Tk):
         left, top, right, bottom = rect
         width, height = right - left, bottom - top
         try:
-            img = grab_xywh(left, top, width, height)
+            cx, cy = pyautogui.position()
+        except Exception:
+            cx = cy = None
+
+        view_size = 240
+        cap_w = max(40, min(view_size, width))
+        cap_h = max(40, min(view_size, height))
+        if (
+            cx is not None
+            and cy is not None
+            and left <= cx <= right
+            and top <= cy <= bottom
+        ):
+            cap_left = int(
+                min(max(cx - cap_w // 2, left), max(left, right - cap_w))
+            )
+            cap_top = int(
+                min(max(cy - cap_h // 2, top), max(top, bottom - cap_h))
+            )
+            cursor_inside = True
+        else:
+            cap_left = int(left + max(0, (width - cap_w) // 2))
+            cap_top = int(top + max(0, (height - cap_h) // 2))
+            cursor_inside = False
+
+        cap_w = int(min(cap_w, right - cap_left))
+        cap_h = int(min(cap_h, bottom - cap_top))
+        if cap_w <= 0 or cap_h <= 0:
+            self.stop_live_preview()
+            return
+
+        try:
+            img = grab_xywh(cap_left, cap_top, cap_w, cap_h)
         except Exception as exc:
             self.log_print(f"Live preview capture failed: {exc}")
             self.stop_live_preview()
             return
 
-        try:
-            cx, cy = pyautogui.position()
-        except Exception:
-            cx = cy = None
-
         draw = ImageDraw.Draw(img)
-        if cx is not None and left <= cx <= right and top <= cy <= bottom:
-            rel_x = cx - left
-            rel_y = cy - top
-            draw.line([(rel_x - 12, rel_y), (rel_x + 12, rel_y)], fill="red", width=2)
-            draw.line([(rel_x, rel_y - 12), (rel_x, rel_y + 12)], fill="red", width=2)
-        draw.rectangle([(0, 0), (width - 1, height - 1)], outline="yellow", width=2)
+        draw.rectangle([(0, 0), (img.width - 1, img.height - 1)], outline="yellow", width=2)
+
+        info_text = "cursor outside"
+        if cursor_inside and cx is not None and cy is not None:
+            local_x = cx - cap_left
+            local_y = cy - cap_top
+            draw.line([(local_x - 12, local_y), (local_x + 12, local_y)], fill="red", width=2)
+            draw.line([(local_x, local_y - 12), (local_x, local_y + 12)], fill="red", width=2)
+            rel_x = (cx - left) / width if width else 0
+            rel_y = (cy - top) / height if height else 0
+            info_text = f"abs({cx},{cy}) rel({rel_x:.3f},{rel_y:.3f})"
+        elif cx is not None and cy is not None:
+            info_text = f"abs({cx},{cy})"
+
+        draw.rectangle([(0, 0), (img.width, 18)], fill="black")
+        draw.text((4, 2), info_text, fill="white")
 
         display = img.copy()
-        display.thumbnail((640, 360))
+        display.thumbnail((360, 360))
         self.live_preview_imgtk = ImageTk.PhotoImage(display)
         if self.live_preview_label:
             self.live_preview_label.configure(image=self.live_preview_imgtk)
@@ -1873,6 +1919,29 @@ class RDPApp(tk.Tk):
                     "streitwert_results_csv", "streitwert_results.csv"
                 )
             )
+            hits_pt = self.cfg.get("pdf_hits_point")
+            if not (
+                isinstance(hits_pt, (list, tuple)) and len(hits_pt) == 2
+            ):
+                legacy = self.cfg.get("pdf_hits_region")
+                if (
+                    isinstance(legacy, (list, tuple))
+                    and len(legacy) == 4
+                    and all(isinstance(v, (int, float)) for v in legacy)
+                ):
+                    converted = [legacy[0] + legacy[2] / 2, legacy[1] + legacy[3] / 2]
+                    self.cfg["pdf_hits_point"] = converted
+                    hits_pt = converted
+                    self.cfg.pop("pdf_hits_region", None)
+            if hasattr(self, "pdf_hits_var"):
+                if (
+                    isinstance(hits_pt, (list, tuple))
+                    and len(hits_pt) == 2
+                    and all(isinstance(v, (int, float)) for v in hits_pt)
+                ):
+                    self.pdf_hits_var.set(f"{hits_pt[0]:.3f}, {hits_pt[1]:.3f}")
+                else:
+                    self.pdf_hits_var.set("")
             view_pt = self.cfg.get("doc_view_point")
             if isinstance(view_pt, (list, tuple)) and len(view_pt) == 2:
                 self.doc_view_var.set(f"{view_pt[0]:.3f}, {view_pt[1]:.3f}")
