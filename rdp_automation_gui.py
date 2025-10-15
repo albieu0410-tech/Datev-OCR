@@ -50,6 +50,18 @@ DEFAULTS = {
     "amount_profiles": [],  # list of dicts
     "active_amount_profile": "",  # profile name
     "use_amount_profile": False,  # if True, restrict OCR to profile sub-region
+    # --- Streitwert workflow (NEW) ---
+    "doclist_region": [0.10, 0.24, 0.78, 0.50],  # list/table area with documents
+    "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
+    "pdf_hits_region": [0.02, 0.22, 0.18, 0.60],  # left panel with search hits
+    "pdf_text_region": [0.20, 0.18, 0.74, 0.68],  # main page text area
+    "includes": "Urt,SWB,SW",  # rows to include if they contain any of these
+    "excludes": "SaM,KLE",  # rows to skip if they contain any of these
+    "exclude_prefix_k": True,  # also skip rows starting with 'K' (e.g. 'K9 Urteil')
+    "streitwert_term": "Streitwert",  # term to type into PDF search
+    "streitwert_results_csv": "streitwert_results.csv",
+    "doc_open_wait": 1.2,  # wait (s) after opening a doc
+    "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -177,8 +189,59 @@ def find_green_band(color_img_pil):
     return color_img_pil.crop((x0, y0, x1, y1))
 
 
+# ---------- OCR TSV helpers (Streitwert) ----------
+def normalize_line(text: str) -> str:
+    if not text:
+        return ""
+    fix = str.maketrans({"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"})
+    t = text.translate(fix)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\beur\b", "EUR", t, flags=re.IGNORECASE)
+    return t
+
+
+AMOUNT_RE = re.compile(r"\b\d{1,3}(?:[.\s]\d{3})*,\d{2}\s*(?:EUR|€)\b", re.IGNORECASE)
+
+
+def extract_amount_from_text(text: str):
+    t = normalize_line(text)
+    m = AMOUNT_RE.search(t)
+    return m.group(0) if m else None
+
+
+def lines_from_tsv(tsv_df):
+    """
+    From pytesseract data -> [(x,y,w,h,text), ...] top-to-bottom, left-to-right.
+    """
+    if tsv_df is None or tsv_df.empty:
+        return []
+    df = tsv_df.dropna(subset=["text"])
+    df = df[df["conf"] > -1]
+    lines = []
+    for (_, _, _), grp in df.groupby(["block_num", "par_num", "line_num"]):
+        ys = grp["top"].min()
+        xs = grp["left"].min()
+        w = (grp["left"] + grp["width"]).max() - xs
+        h = (grp["top"] + grp["height"]).max() - ys
+        txt = " ".join(str(t) for t in grp["text"] if str(t).strip())
+        if txt.strip():
+            lines.append((int(xs), int(ys), int(w), int(h), txt.strip()))
+    lines.sort(key=lambda x: (x[1], x[0]))
+    return lines
+
+
+def _grab_region_color_generic(current_rect, rel_box, upscale):
+    rx, ry, rw, rh = rel_to_abs(current_rect, rel_box)
+    img = grab_xywh(rx, ry, rw, rh)
+    try:
+        scale_val = int(float(upscale))
+    except Exception:
+        scale_val = 3
+    scale = max(1, scale_val)
+    return upscale_pil(img, scale=scale)
+
+
 # ---------- Normalization / parsing ----------
-AMOUNT_RE = re.compile(r"\b\d+(?:[.\s]\d{3})*[.,]\d{2}\s*(?:EUR|€)?\b", re.IGNORECASE)
 DIGIT_FIX = str.maketrans(
     {"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"}
 )
@@ -207,28 +270,19 @@ def normalize_line_soft(text: str) -> str:
     t = re.sub(r"\beur\b", "EUR", t, flags=re.IGNORECASE)
     t = re.sub(r"(\d+)\.(\d{2})\b", r"\1,\2", t)
     return t
-
-
-def lines_from_tsv(tsv_df):
-    if tsv_df is None or tsv_df.empty:
-        return []
-    df = tsv_df.dropna(subset=["text"])
-    df = df[df["conf"] > -1]
-    lines = []
-    for (_, _, _), grp in df.groupby(["block_num", "par_num", "line_num"]):
-        ys = grp["top"].min()
-        txt = " ".join(str(t) for t in grp["text"] if str(t).strip())
-        if txt.strip():
-            lines.append((int(ys), txt.strip()))
-    lines.sort(key=lambda x: x[0])
-    return lines
-
-
 def extract_amount_from_lines(lines, keyword=None):
     if not lines:
         return None, None
 
-    norm_lines = [(y, normalize_line_soft(t)) for y, t in lines]
+    processed = []
+    for entry in lines:
+        if isinstance(entry, (list, tuple)) and len(entry) == 5:
+            _, y, _, _, text = entry
+        else:
+            y, text = entry
+        processed.append((y, text))
+
+    norm_lines = [(y, normalize_line_soft(t)) for y, t in processed]
 
     def find_amounts(text):
         amts = AMOUNT_RE.findall(text)
@@ -417,6 +471,99 @@ class RDPApp(tk.Tk):
             value=f"{rr[0]:.3f}, {rr[1]:.3f}, {rr[2]:.3f}, {rr[3]:.3f}"
         )
         ttk.Entry(left, textvariable=self.rr_var, width=40).pack(anchor="w")
+
+        # --- Streitwert workflow calibration (NEW) ---
+        ttk.Separator(left).pack(fill=tk.X, pady=8)
+        ttk.Label(left, text="Streitwert workflow").pack(anchor="w")
+
+        cal = ttk.Frame(left)
+        cal.pack(anchor="w", pady=(2, 0))
+        ttk.Button(
+            cal,
+            text="Pick Doc List Region",
+            command=self.pick_doclist_region,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            cal,
+            text="Pick PDF Search Point",
+            command=self.pick_pdf_search_point,
+        ).pack(side=tk.LEFT, padx=2)
+
+        cal2 = ttk.Frame(left)
+        cal2.pack(anchor="w", pady=(2, 0))
+        ttk.Button(
+            cal2,
+            text="Pick PDF Results Region",
+            command=self.pick_pdf_hits_region,
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            cal2,
+            text="Pick PDF Text Region",
+            command=self.pick_pdf_text_region,
+        ).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(left, text="Include tokens (comma-separated)").pack(
+            anchor="w", pady=(6, 0)
+        )
+        self.includes_var = tk.StringVar(
+            value=self.cfg.get("includes", "Urt,SWB,SW")
+        )
+        ttk.Entry(left, textvariable=self.includes_var, width=40).pack(anchor="w")
+
+        ttk.Label(left, text="Exclude tokens (comma-separated)").pack(
+            anchor="w", pady=(6, 0)
+        )
+        self.excludes_var = tk.StringVar(
+            value=self.cfg.get("excludes", "SaM,KLE")
+        )
+        ttk.Entry(left, textvariable=self.excludes_var, width=40).pack(anchor="w")
+
+        self.exclude_k_var = tk.BooleanVar(
+            value=self.cfg.get("exclude_prefix_k", True)
+        )
+        ttk.Checkbutton(
+            left,
+            text="Exclude rows starting with 'K'",
+            variable=self.exclude_k_var,
+        ).pack(anchor="w")
+
+        row3 = ttk.Frame(left)
+        row3.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row3, text="PDF search term").pack(side=tk.LEFT)
+        self.streitwort_var = tk.StringVar(
+            value=self.cfg.get("streitwert_term", "Streitwert")
+        )
+        ttk.Entry(row3, textvariable=self.streitwort_var, width=16).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Label(row3, text="Open wait (s)").pack(side=tk.LEFT)
+        self.docwait_var = tk.StringVar(
+            value=str(self.cfg.get("doc_open_wait", 1.2))
+        )
+        ttk.Entry(row3, textvariable=self.docwait_var, width=6).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Label(row3, text="Hit wait (s)").pack(side=tk.LEFT)
+        self.hitwait_var = tk.StringVar(
+            value=str(self.cfg.get("pdf_hit_wait", 1.0))
+        )
+        ttk.Entry(row3, textvariable=self.hitwait_var, width=6).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        ttk.Label(left, text="Streitwert CSV").pack(anchor="w", pady=(6, 0))
+        self.streit_csv_var = tk.StringVar(
+            value=self.cfg.get(
+                "streitwert_results_csv", "streitwert_results.csv"
+            )
+        )
+        ttk.Entry(left, textvariable=self.streit_csv_var, width=40).pack(
+            anchor="w", pady=(0, 4)
+        )
+
+        ttk.Button(
+            left, text="Run Streitwert Scan", command=self.run_streitwert_threaded
+        ).pack(anchor="w", pady=(6, 0))
 
         # OCR options & full-region parsing
         rowb = ttk.Frame(left)
@@ -608,6 +755,63 @@ class RDPApp(tk.Tk):
         )
         self.log_print(f"Result region set (relative): {rel_box}")
 
+    def _two_click_box(self, msg1, msg2):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return None
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        messagebox.showinfo("Pick", msg1)
+        x1, y1 = pyautogui.position()
+        messagebox.showinfo("Pick", msg2)
+        x2, y2 = pyautogui.position()
+        left, top = min(x1, x2), min(y1, y2)
+        width, height = abs(x2 - x1), abs(y2 - y1)
+        return abs_to_rel(
+            self.current_rect, abs_box=(left, top, width, height)
+        )
+
+    def pick_doclist_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the document list area, then OK.",
+            "Hover BOTTOM-RIGHT of the document list area, then OK.",
+        )
+        if rb:
+            self.cfg["doclist_region"] = rb
+            self.log_print(f"Doc list region set: {rb}")
+
+    def pick_pdf_hits_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the PDF search hits panel, then OK.",
+            "Hover BOTTOM-RIGHT of the PDF hits panel, then OK.",
+        )
+        if rb:
+            self.cfg["pdf_hits_region"] = rb
+            self.log_print(f"PDF hits region set: {rb}")
+
+    def pick_pdf_text_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the PDF page text area, then OK.",
+            "Hover BOTTOM-RIGHT of the PDF page text area, then OK.",
+        )
+        if rb:
+            self.cfg["pdf_text_region"] = rb
+            self.log_print(f"PDF text region set: {rb}")
+
+    def pick_pdf_search_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        messagebox.showinfo(
+            "Pick", "Hover the PDF search box caret position, then OK."
+        )
+        x, y = pyautogui.position()
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["pdf_search_point"] = rel
+        self.log_print(f"PDF search point set: {rel}")
+
     def pick_amount_region(self):
         """Pick a sub-region INSIDE the current Result Region; saves it into the profile editor fields."""
         if not self.current_rect:
@@ -767,12 +971,15 @@ class RDPApp(tk.Tk):
         lang = self.lang_var.get().strip() or "deu+eng"
         df = do_ocr_data(crop, lang=lang, psm=6)
         lines = lines_from_tsv(df)
-        full_text = "\n".join(t for _, t in lines)
+        simple_lines = [(y, text) for _, y, _, _, text in lines]
+        full_text = "\n".join(t for _, t in simple_lines)
         if self.normalize_var.get():
-            lines = [(y, normalize_line_soft(t)) for y, t in lines]
-            full_text = "\n".join(t for _, t in lines)
-        amount, line = extract_amount_from_lines(lines, keyword=keyword)
-        return full_text, crop, lines, amount
+            normalized_lines = [(y, normalize_line_soft(t)) for y, t in simple_lines]
+            full_text = "\n".join(t for _, t in normalized_lines)
+        else:
+            normalized_lines = simple_lines
+        amount, line = extract_amount_from_lines(normalized_lines, keyword=keyword)
+        return full_text, crop, normalized_lines, amount
 
     # ---------- Batch ----------
     def run_batch_threaded(self):
@@ -860,6 +1067,156 @@ class RDPApp(tk.Tk):
         except Exception as e:
             self.log_print("ERROR: " + repr(e))
 
+    def run_streitwert_threaded(self):
+        t = threading.Thread(target=self.run_streitwert, daemon=True)
+        t.start()
+
+    def run_streitwert(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            # 1) OCR the document list region and filter rows
+            doc_img = _grab_region_color_generic(
+                self.current_rect,
+                self.cfg["doclist_region"],
+                self.upscale_var.get(),
+            )
+            df = do_ocr_data(
+                doc_img,
+                lang=self.lang_var.get().strip() or "deu+eng",
+                psm=6,
+            )
+            lines = lines_from_tsv(df)  # (x,y,w,h,text)
+
+            inc = [
+                t.strip().lower()
+                for t in (self.includes_var.get() or "").split(",")
+                if t.strip()
+            ]
+            exc = [
+                t.strip().lower()
+                for t in (self.excludes_var.get() or "").split(",")
+                if t.strip()
+            ]
+            excl_k = bool(self.exclude_k_var.get())
+
+            rx, ry, rw, rh = rel_to_abs(
+                self.current_rect, self.cfg["doclist_region"]
+            )
+            to_open = []
+            for x, y, w, h, txt in lines:
+                norm = normalize_line(txt)
+                low = norm.lower()
+                if excl_k and re.match(r"\s*k", low):
+                    continue
+                if any(tok in low for tok in exc):
+                    continue
+                if any(tok in low for tok in inc):
+                    to_open.append((norm, x, y, w, h))
+
+            if not to_open:
+                self.log_print("No rows matched include filters.")
+                return
+
+            results = []
+            for i, (norm, x, y, w, h) in enumerate(to_open, 1):
+                cx = rx + max(10, x + 15)
+                cy = ry + y + h // 2
+                pyautogui.doubleClick(cx, cy)
+                time.sleep(float(self.docwait_var.get() or 1.2))
+
+                # 2) Search inside PDF
+                sx, sy = rel_to_abs(
+                    self.current_rect, self.cfg["pdf_search_point"]
+                )
+                pyautogui.click(sx, sy)
+                pyautogui.hotkey("ctrl", "a")
+                pyautogui.press("backspace")
+                term = self.streitwort_var.get() or "Streitwert"
+                pyautogui.typewrite(
+                    term, interval=float(self.type_var.get() or 0.02)
+                )
+                pyautogui.press("enter")
+                time.sleep(float(self.hitwait_var.get() or 1.0))
+
+                # 3) Click topmost hit in hits panel
+                hits_img = _grab_region_color_generic(
+                    self.current_rect,
+                    self.cfg["pdf_hits_region"],
+                    self.upscale_var.get(),
+                )
+                dfh = do_ocr_data(
+                    hits_img,
+                    lang=self.lang_var.get().strip() or "deu+eng",
+                    psm=6,
+                )
+                hits = lines_from_tsv(dfh)
+                hx_abs = hy_abs = None
+                if hits:
+                    target = None
+                    for xh, yh, wh, hh, t in hits:
+                        if term.lower() in t.lower():
+                            target = (xh, yh, wh, hh, t)
+                            break
+                    if target is None:
+                        target = hits[0]
+                    xh, yh, wh, hh, _ = target
+                    rxh, ryh, _, _ = rel_to_abs(
+                        self.current_rect, self.cfg["pdf_hits_region"]
+                    )
+                    hx_abs = rxh + max(10, xh + 10)
+                    hy_abs = ryh + yh + hh // 2
+                    pyautogui.click(hx_abs, hy_abs)
+                    time.sleep(float(self.hitwait_var.get() or 1.0))
+                else:
+                    rxh, ryh, _, _ = rel_to_abs(
+                        self.current_rect, self.cfg["pdf_hits_region"]
+                    )
+                    pyautogui.click(rxh + 20, ryh + 30)
+                    time.sleep(float(self.hitwait_var.get() or 1.0))
+
+                # 4) Read amount from page text region
+                page_img = _grab_region_color_generic(
+                    self.current_rect,
+                    self.cfg["pdf_text_region"],
+                    self.upscale_var.get(),
+                )
+                dft = do_ocr_data(
+                    page_img,
+                    lang=self.lang_var.get().strip() or "deu+eng",
+                    psm=6,
+                )
+                lines_pg = lines_from_tsv(dft)
+                combined = "\n".join(
+                    normalize_line(t) for _, _, _, _, t in lines_pg
+                )
+                amount = extract_amount_from_text(combined)
+
+                results.append({
+                    "row_text": norm,
+                    "amount": amount or "",
+                })
+                self.log_print(
+                    f"[{i}/{len(to_open)}] {norm} → {amount or '(none)'}"
+                )
+
+            pd.DataFrame(results).to_csv(
+                self.streit_csv_var.get(), index=False, encoding="utf-8-sig"
+            )
+            self.log_print(
+                f"Done. Saved Streitwert results to {self.streit_csv_var.get()}"
+            )
+
+        except Exception as e:
+            self.log_print("ERROR: " + repr(e))
+
     # ---------- Utilities ----------
     def show_preview(self, img: Image.Image):
         preview = img.copy()
@@ -911,6 +1268,24 @@ class RDPApp(tk.Tk):
         self.cfg["use_amount_profile"] = bool(self.use_profile_var.get())
         self.cfg["active_amount_profile"] = self.profile_var.get() or ""
 
+        self.cfg["includes"] = self.includes_var.get().strip()
+        self.cfg["excludes"] = self.excludes_var.get().strip()
+        self.cfg["exclude_prefix_k"] = bool(self.exclude_k_var.get())
+        self.cfg["streitwert_term"] = (
+            self.streitwort_var.get().strip() or "Streitwert"
+        )
+        try:
+            self.cfg["doc_open_wait"] = float(self.docwait_var.get() or "1.2")
+        except Exception:
+            self.cfg["doc_open_wait"] = 1.2
+        try:
+            self.cfg["pdf_hit_wait"] = float(self.hitwait_var.get() or "1.0")
+        except Exception:
+            self.cfg["pdf_hit_wait"] = 1.0
+        self.cfg["streitwert_results_csv"] = (
+            self.streit_csv_var.get().strip() or "streitwert_results.csv"
+        )
+
     def load_config(self):
         try:
             self.cfg = load_cfg()  # Load from file
@@ -932,6 +1307,19 @@ class RDPApp(tk.Tk):
             self.fullparse_var.set(self.cfg.get("use_full_region_parse", True))
             self.keyword_var.set(self.cfg.get("keyword", "Honorar"))
             self.normalize_var.set(self.cfg.get("normalize_ocr", True))
+            self.includes_var.set(self.cfg.get("includes", "Urt,SWB,SW"))
+            self.excludes_var.set(self.cfg.get("excludes", "SaM,KLE"))
+            self.exclude_k_var.set(self.cfg.get("exclude_prefix_k", True))
+            self.streitwort_var.set(
+                self.cfg.get("streitwert_term", "Streitwert")
+            )
+            self.docwait_var.set(str(self.cfg.get("doc_open_wait", 1.2)))
+            self.hitwait_var.set(str(self.cfg.get("pdf_hit_wait", 1.0)))
+            self.streit_csv_var.set(
+                self.cfg.get(
+                    "streitwert_results_csv", "streitwert_results.csv"
+                )
+            )
 
             # Profiles UI
             self.profile_names = [
