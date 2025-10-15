@@ -1145,12 +1145,81 @@ class RDPApp(tk.Tk):
             if exc and any(tok in low_raw or tok in low_norm for tok in exc):
                 debug_rows.append((raw, "matched exclude token"))
                 continue
-            if inc and not any(tok in low_raw or tok in low_norm for tok in inc):
+            matched_token = None
+            if inc:
+                for tok in inc:
+                    if tok in low_raw or tok in low_norm:
+                        matched_token = tok
+                        break
+            if inc and not matched_token:
                 debug_rows.append((raw, "missing include token"))
                 continue
-            matches.append((norm, x, y, w, h, raw))
+            matches.append(
+                {
+                    "norm": norm,
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "raw": raw,
+                    "token": matched_token or "",
+                }
+            )
 
         return matches, inc, exc, debug_rows
+
+    def _prioritize_streitwert_matches(self, matches, inc):
+        if not matches:
+            return []
+        if not inc:
+            return matches
+
+        ordered = []
+        used_indices = set()
+
+        for tok in inc:
+            best_idx = None
+            for idx, match in enumerate(matches):
+                if idx in used_indices:
+                    continue
+                if match["token"] == tok:
+                    best_idx = idx
+                    break
+            if best_idx is not None:
+                ordered.append(matches[best_idx])
+                used_indices.add(best_idx)
+
+        for idx, match in enumerate(matches):
+            if idx in used_indices:
+                continue
+            ordered.append(match)
+
+        return ordered
+
+    def _doclist_abs_rect(self):
+        if not self.current_rect:
+            return None
+        try:
+            return rel_to_abs(self.current_rect, self.cfg["doclist_region"])
+        except Exception:
+            return None
+
+    def _open_doclist_entry(self, match, doc_rect, focus_first=False):
+        if not match or not doc_rect:
+            return False
+        rx, ry, rw, rh = doc_rect
+        if focus_first:
+            pyautogui.click(rx + max(5, rw // 40), ry + max(5, rh // 40))
+            time.sleep(0.2)
+        cx_offset = match["w"] // 2 if match["w"] else 15
+        cx_offset = max(12, min(cx_offset, 60))
+        click_x = rx + match["x"] + cx_offset
+        click_y = ry + match["y"] + max(10, match["h"] // 2)
+        pyautogui.moveTo(click_x, click_y)
+        pyautogui.click(click_x, click_y)
+        time.sleep(0.1)
+        pyautogui.doubleClick(click_x, click_y)
+        return True
 
     def run_streitwert(self):
         try:
@@ -1176,15 +1245,20 @@ class RDPApp(tk.Tk):
             )
             lines = lines_from_tsv(df)  # (x,y,w,h,text)
 
-            rx, ry, rw, rh = rel_to_abs(
-                self.current_rect, self.cfg["doclist_region"]
-            )
+            doc_rect = self._doclist_abs_rect()
+            if not doc_rect:
+                self.log_print(
+                    "Doc list region is not configured. Please re-run calibration."
+                )
+                return
+
             to_open, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
+            ordered = self._prioritize_streitwert_matches(to_open, inc)
 
             self.log_print(
                 f"Doc list OCR produced {len(lines)} lines; matched {len(to_open)} rows."
             )
-            if not to_open:
+            if not ordered:
                 if not lines:
                     self.log_print("No OCR lines detected in document list region.")
                 else:
@@ -1205,12 +1279,23 @@ class RDPApp(tk.Tk):
                     "No rows matched include filters. Adjust tokens or verify OCR via the test button."
                 )
                 return
+            else:
+                preview = ", ".join(
+                    f"{match['token'] or 'any'} → {match['raw']}" for match in ordered[:5]
+                )
+                self.log_print(
+                    f"Opening {len(ordered)} row(s) based on include mapping. First entries: {preview}"
+                )
 
             results = []
-            for i, (norm, x, y, w, h, raw_txt) in enumerate(to_open, 1):
-                cx = rx + max(10, x + 15)
-                cy = ry + y + h // 2
-                pyautogui.doubleClick(cx, cy)
+            for i, match in enumerate(ordered, 1):
+                if not self._open_doclist_entry(
+                    match, doc_rect, focus_first=(i == 1)
+                ):
+                    self.log_print(
+                        f"[{i}/{len(ordered)}] Unable to activate doc row: {match.get('raw','')}"
+                    )
+                    continue
                 time.sleep(float(self.docwait_var.get() or 1.2))
 
                 # 2) Search inside PDF
@@ -1281,11 +1366,11 @@ class RDPApp(tk.Tk):
                 amount = extract_amount_from_text(combined)
 
                 results.append({
-                    "row_text": norm,
+                    "row_text": match["norm"],
                     "amount": amount or "",
                 })
                 self.log_print(
-                    f"[{i}/{len(to_open)}] {norm} → {amount or '(none)'}"
+                    f"[{i}/{len(ordered)}] {match['norm']} → {amount or '(none)'}"
                 )
 
             pd.DataFrame(results).to_csv(
@@ -1321,18 +1406,33 @@ class RDPApp(tk.Tk):
             )
             lines = lines_from_tsv(df)
             matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
+            ordered = self._prioritize_streitwert_matches(matches, inc)
+            doc_rect = self._doclist_abs_rect()
 
             self.log_print(
                 f"[Test] Doc list OCR lines: {len(lines)} | includes: {inc or ['(none)']} | excludes: {exc or ['(none)']}"
             )
             if matches:
-                for norm, _, _, _, _, raw in matches[:5]:
-                    self.log_print(f"  MATCH → {raw}")
+                for match in ordered[:5]:
+                    tag = match["token"] or "any"
+                    self.log_print(f"  MATCH ({tag}) → {match['raw']}")
             else:
                 preview = debug_rows[:5] or [(raw, "") for *_, raw in lines[:5]]
                 for raw, reason in preview:
                     desc = f"  {reason or 'OCR'} → {raw}"
                     self.log_print(desc)
+
+            if ordered and doc_rect:
+                first = ordered[0]
+                if self._open_doclist_entry(first, doc_rect, focus_first=True):
+                    self.log_print(
+                        f"[Test] Opened first matching row ({first['token'] or 'any'}): {first['raw']}"
+                    )
+                    time.sleep(float(self.docwait_var.get() or 1.2))
+                else:
+                    self.log_print("[Test] Failed to click first matching row.")
+            elif not doc_rect:
+                self.log_print("[Test] Doc list region not configured.")
 
             try:
                 sx, sy = rel_to_abs(
