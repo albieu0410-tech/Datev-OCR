@@ -1611,6 +1611,19 @@ class RDPApp(tk.Tk):
                     f"[{idx}/{total}] Typed '{aktenzeichen}' into the document search box."
                 )
 
+                term = self.streitwort_var.get().strip() or "Streitwert"
+                if not self._type_pdf_search(
+                    term, prefix=f"[{idx}/{total}] "
+                ):
+                    self.log_print(
+                        f"[{idx}/{total}] Unable to type Streitwert term in the PDF search box."
+                    )
+                    continue
+                self.log_print(
+                    f"[{idx}/{total}] Typed '{term}' into the PDF search box."
+                )
+                time.sleep(list_wait)
+
                 rx, ry, rw, rh = doc_rect
                 focus_x = rx + max(5, rw // 40)
                 focus_y = ry + max(5, rh // 40)
@@ -1723,10 +1736,10 @@ class RDPApp(tk.Tk):
 
             term = self.streitwort_var.get() or "Streitwert"
             list_wait = float(self.cfg.get("post_search_wait", 1.2))
-            if not self._type_doclist_query(term, prefix="[Test] "):
+            if not self._type_pdf_search(term, prefix="[Test] "):
                 self.log_print("[Test] Unable to type the Streitwert search term.")
                 return
-            self.log_print(f"[Test] Typed '{term}' into the document search box.")
+            self.log_print(f"[Test] Typed '{term}' into the PDF search box.")
             time.sleep(list_wait)
 
             rx, ry, rw, rh = doc_rect
