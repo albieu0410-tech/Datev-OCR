@@ -63,6 +63,7 @@ DEFAULTS = {
     "doc_open_wait": 1.2,  # wait (s) after opening a doc
     "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
     "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
+    "pdf_close_point": [0.97, 0.05],  # close button for the PDF viewer window
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -573,6 +574,27 @@ class RDPApp(tk.Tk):
             state="readonly",
         ).pack(side=tk.LEFT, padx=4)
 
+        cal5 = ttk.Frame(streit_frame)
+        cal5.pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            cal5,
+            text="Pick PDF Close Button",
+            command=self.pick_pdf_close_point,
+        ).pack(side=tk.LEFT, padx=2)
+        close_pt = self.cfg.get("pdf_close_point")
+        close_txt = (
+            f"{close_pt[0]:.3f}, {close_pt[1]:.3f}"
+            if isinstance(close_pt, (list, tuple)) and len(close_pt) == 2
+            else ""
+        )
+        self.pdf_close_var = tk.StringVar(value=close_txt)
+        ttk.Entry(
+            cal5,
+            textvariable=self.pdf_close_var,
+            width=20,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=4)
+
         ttk.Label(streit_frame, text="Include tokens (comma-separated)").pack(
             anchor="w", pady=(6, 0)
         )
@@ -948,6 +970,22 @@ class RDPApp(tk.Tk):
         self.cfg["doc_view_point"] = rel
         self.doc_view_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
         self.log_print(f"View button point set: {rel}")
+
+    def pick_pdf_close_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        x, y = self._prompt_and_capture_point(
+            "Pick",
+            "Hover the PDF window close button (X), then confirm.",
+        )
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["pdf_close_point"] = rel
+        if hasattr(self, "pdf_close_var"):
+            self.pdf_close_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
+        self.log_print(f"PDF close button point set: {rel}")
 
     def pick_amount_region(self):
         """Pick a sub-region INSIDE the current Result Region; saves it into the profile editor fields."""
@@ -1359,6 +1397,25 @@ class RDPApp(tk.Tk):
         time.sleep(float(self.hitwait_var.get() or 1.0))
         return True
 
+    def _click_pdf_close_button(self, prefix=""):
+        if not self.current_rect:
+            return False
+        point = self.cfg.get("pdf_close_point")
+        if not (isinstance(point, (list, tuple)) and len(point) == 2):
+            msg = "PDF close button point is not configured. Please calibrate it."
+            self.log_print(f"{prefix}{msg}" if prefix else msg)
+            return False
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+        cx, cy = rel_to_abs(self.current_rect, point)
+        self.log_print(f"{prefix}Clicking PDF close button at ({cx}, {cy}).")
+        pyautogui.moveTo(cx, cy)
+        pyautogui.click(cx, cy)
+        time.sleep(0.3)
+        return True
+
     def _type_doclist_query(self, query, press_enter=True, prefix=""):
         if not self.current_rect:
             return False
@@ -1388,7 +1445,13 @@ class RDPApp(tk.Tk):
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
             return
-        self.log_print(f"{prefix}Closing active PDF window (Ctrl+W, Ctrl+F4).")
+        if self._click_pdf_close_button(prefix=prefix):
+            self.log_print(f"{prefix}Requested PDF close via window button.")
+            time.sleep(0.6)
+            return
+        self.log_print(
+            f"{prefix}PDF close button not configured; using keyboard shortcuts."
+        )
         pyautogui.hotkey("ctrl", "w")
         time.sleep(0.4)
         pyautogui.hotkey("ctrl", "f4")
@@ -1947,6 +2010,16 @@ class RDPApp(tk.Tk):
                 self.doc_view_var.set(f"{view_pt[0]:.3f}, {view_pt[1]:.3f}")
             else:
                 self.doc_view_var.set("")
+            close_pt = self.cfg.get("pdf_close_point")
+            if hasattr(self, "pdf_close_var"):
+                if (
+                    isinstance(close_pt, (list, tuple))
+                    and len(close_pt) == 2
+                    and all(isinstance(v, (int, float)) for v in close_pt)
+                ):
+                    self.pdf_close_var.set(f"{close_pt[0]:.3f}, {close_pt[1]:.3f}")
+                else:
+                    self.pdf_close_var.set("")
 
             # Profiles UI
             self.profile_names = [
