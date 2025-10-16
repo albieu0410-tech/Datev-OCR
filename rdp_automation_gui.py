@@ -70,6 +70,7 @@ DEFAULTS = {
     # --- Rechnungen workflow (NEW) ---
     "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
+    "rechnungen_only_results_csv": "rechnungen_only_results.csv",
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -801,6 +802,18 @@ class RDPApp(tk.Tk):
             command=self.test_rechnungen_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
+        ttk.Label(rechn_frame, text="Rechnungen-only CSV").pack(
+            anchor="w", pady=(6, 0)
+        )
+        self.rechnungen_only_csv_var = tk.StringVar(
+            value=self.cfg.get(
+                "rechnungen_only_results_csv", "rechnungen_only_results.csv"
+            )
+        )
+        ttk.Entry(
+            rechn_frame, textvariable=self.rechnungen_only_csv_var, width=40
+        ).pack(anchor="w", pady=(0, 4))
+
         ttk.Button(
             rechn_frame,
             text="Run Rechnungen Extraction",
@@ -1501,10 +1514,13 @@ class RDPApp(tk.Tk):
 
             if results:
                 pd.DataFrame(results).to_csv(
-                    self.rechnungen_csv_var.get(), index=False, encoding="utf-8-sig"
+                    self.rechnungen_only_csv_var.get(),
+                    index=False,
+                    encoding="utf-8-sig",
                 )
                 self.log_print(
-                    f"Done. Saved Rechnungen results to {self.rechnungen_csv_var.get()}"
+                    "Done. Saved Rechnungen-only results to "
+                    f"{self.rechnungen_only_csv_var.get()}"
                 )
             else:
                 self.log_print(
@@ -2846,6 +2862,11 @@ class RDPApp(tk.Tk):
                 self.rechnungen_csv_var.get().strip()
                 or "Streitwert_Results_Rechnungen.csv"
             )
+        if hasattr(self, "rechnungen_only_csv_var"):
+            self.cfg["rechnungen_only_results_csv"] = (
+                self.rechnungen_only_csv_var.get().strip()
+                or "rechnungen_only_results.csv"
+            )
         self.cfg["streitwert_overlay_skip_waits"] = bool(
             self.skip_waits_var.get()
         )
@@ -2896,6 +2917,13 @@ class RDPApp(tk.Tk):
                     self.cfg.get(
                         "rechnungen_results_csv",
                         "Streitwert_Results_Rechnungen.csv",
+                    )
+                )
+            if hasattr(self, "rechnungen_only_csv_var"):
+                self.rechnungen_only_csv_var.set(
+                    self.cfg.get(
+                        "rechnungen_only_results_csv",
+                        "rechnungen_only_results.csv",
                     )
                 )
             if hasattr(self, "skip_waits_var"):
