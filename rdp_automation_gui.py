@@ -231,6 +231,25 @@ def extract_amount_from_text(text: str):
     return matches[0].group(0).strip().strip(".,;: ")
 
 
+def clean_amount_display(amount: str) -> str:
+    if not amount:
+        return amount
+    amt = amount.strip()
+    # ensure consistent spacing before currency suffix
+    amt = re.sub(r"(\d)(EUR|€)$", r"\1 \2", amt, flags=re.IGNORECASE)
+    amt = re.sub(r"\s+(EUR|€)$", r" \1", amt, flags=re.IGNORECASE)
+
+    # remove leading zero-padded fragments that belong to invoice prefixes
+    leading = re.match(r"^0\d{2}\s+", amt)
+    if leading:
+        remainder = amt[leading.end():].strip()
+        remainder = re.sub(r"(\d)(EUR|€)$", r"\1 \2", remainder, flags=re.IGNORECASE)
+        remainder = re.sub(r"\s+(EUR|€)$", r" \1", remainder, flags=re.IGNORECASE)
+        if remainder and AMOUNT_RE.fullmatch(remainder):
+            amt = remainder
+    return amt
+
+
 DOC_LOADING_PATTERNS = (
     "dokumente werden geladen",
     "dokumente werden gel",
@@ -1677,6 +1696,7 @@ class RDPApp(tk.Tk):
                 continue
             norm = normalize_line(raw)
             amount = extract_amount_from_text(norm)
+            amount = clean_amount_display(amount) if amount else None
             date_match = DATE_RE.search(norm) if norm else None
             if not amount or not date_match:
                 if amount or date_match:
@@ -2286,7 +2306,8 @@ class RDPApp(tk.Tk):
             f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
         )
         combined = "\n".join(normalize_line(t) for _, _, _, _, t in lines_pg)
-        return extract_amount_from_text(combined)
+        amt = extract_amount_from_text(combined)
+        return clean_amount_display(amt) if amt else None
 
     def _gather_aktenzeichen(self):
         try:
