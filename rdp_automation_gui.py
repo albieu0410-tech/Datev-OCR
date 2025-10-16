@@ -801,6 +801,12 @@ class RDPApp(tk.Tk):
             command=self.test_rechnungen_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
+        ttk.Button(
+            rechn_frame,
+            text="Run Rechnungen Extraction",
+            command=self.run_rechnungen_only_threaded,
+        ).pack(anchor="w", pady=(6, 0))
+
         # --- OCR / Profiles tab ---
         ocr_options = ttk.LabelFrame(ocr_tab, text="OCR Options")
         ocr_options.pack(fill=tk.X, pady=4)
@@ -1424,6 +1430,89 @@ class RDPApp(tk.Tk):
             self._log_rechnungen_summary("[Rechnungen Test] ", summary)
         except Exception as e:
             self.log_print(f"[Rechnungen Test] ERROR: {e!r}")
+
+    def run_rechnungen_only_threaded(self):
+        t = threading.Thread(target=self.run_rechnungen_only, daemon=True)
+        t.start()
+
+    def run_rechnungen_only(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            if not self._doclist_abs_rect():
+                self.log_print(
+                    "Doc list region is not configured. Please re-run calibration."
+                )
+                return
+
+            queries = self._gather_aktenzeichen()
+            if not queries:
+                return
+
+            skip_waits = self._should_skip_manual_waits()
+            list_wait = (
+                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            )
+
+            results = []
+            total = len(queries)
+            for idx, (aktenzeichen, _row) in enumerate(queries, 1):
+                prefix = f"[Rechnungen {idx}/{total}] "
+                self.log_print(
+                    f"{prefix}Searching doc list for Aktenzeichen: {aktenzeichen}"
+                )
+                if not self._type_doclist_query(aktenzeichen, prefix=prefix):
+                    self.log_print(
+                        f"{prefix}Unable to type Aktenzeichen. Skipping entry."
+                    )
+                    continue
+                if list_wait > 0:
+                    time.sleep(list_wait)
+                self.log_print(
+                    f"{prefix}Typed '{aktenzeichen}' into the document search box."
+                )
+
+                self._wait_for_doc_search_ready(
+                    prefix=prefix, reason="after Aktenzeichen search"
+                )
+                self._wait_for_doclist_ready(
+                    prefix=prefix, reason="after Aktenzeichen search"
+                )
+
+                summary = self._extract_rechnungen_summary(prefix=prefix)
+                if summary is None:
+                    self.log_print(
+                        f"{prefix}Rechnungen capture returned no data; storing defaults."
+                    )
+                    summary = self._summarize_rechnungen_entries([])
+                else:
+                    self._log_rechnungen_summary(prefix, summary)
+
+                results.append(
+                    self._build_rechnungen_result_row(aktenzeichen, summary)
+                )
+
+            if results:
+                pd.DataFrame(results).to_csv(
+                    self.rechnungen_csv_var.get(), index=False, encoding="utf-8-sig"
+                )
+                self.log_print(
+                    f"Done. Saved Rechnungen results to {self.rechnungen_csv_var.get()}"
+                )
+            else:
+                self.log_print(
+                    "No Rechnungen values were captured from the Excel list."
+                )
+
+        except Exception as e:
+            self.log_print(f"[Rechnungen] ERROR: {e!r}")
 
     def run_streitwert_threaded(self):
         t = threading.Thread(target=self.run_streitwert, daemon=True)
