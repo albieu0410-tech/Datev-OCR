@@ -234,11 +234,11 @@ def normalize_for_token_match(text: str) -> str:
 
 
 AMOUNT_RE = re.compile(
-    r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?:\s*(?:EUR|€))?",
+    r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{2})?(?:\s*(?:EUR|€))?",
     re.IGNORECASE,
 )
 AMOUNT_CANDIDATE_RE = re.compile(
-    r"(?:€\s*)?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[,\.]\d{2}|,-)(?:\s*(?:EUR|€))?",
+    r"(?:€\s*)?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[,\.]\d{2}|,-)?(?:\s*(?:EUR|€))?",
     re.IGNORECASE,
 )
 DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
@@ -475,21 +475,47 @@ def extract_amount_from_lines(lines, keyword=None):
             }
         )
 
-    def pick_best(indices):
+    def pick_best(indices, required_keywords=None):
         best = None
         best_line = None
         best_value = None
+        best_priority = -1
+        if isinstance(required_keywords, str):
+            required_terms = [required_keywords.strip().lower()]
+        else:
+            required_terms = [
+                str(term).strip().lower()
+                for term in (required_keywords or [])
+                if str(term).strip()
+            ]
         for idx in indices:
             if idx < 0 or idx >= len(processed):
                 continue
             info = processed[idx]
             if not info["candidates"]:
                 continue
+            line_norm = info["norm"].lower()
+            if required_terms:
+                compact_line = re.sub(r"\s+", "", line_norm)
+                has_keyword = any(
+                    term in line_norm or term.replace(" ", "") in compact_line
+                    for term in required_terms
+                )
+                if not has_keyword:
+                    continue
+                priority = 1
+            else:
+                priority = 0
             line_best = max(info["candidates"], key=lambda c: c["value"])
-            if best is None or line_best["value"] > best_value:
+            if (
+                best is None
+                or priority > best_priority
+                or (priority == best_priority and line_best["value"] > best_value)
+            ):
                 best = line_best
                 best_line = info["norm"]
                 best_value = line_best["value"]
+                best_priority = priority
         if best:
             return best["display"], best_line, best_value
         return None, None, None
@@ -500,6 +526,12 @@ def extract_amount_from_lines(lines, keyword=None):
         keys = [str(keyword)]
     else:
         keys = []
+
+    keys_norm = [
+        normalize_line_soft(str(k).strip()).lower()
+        for k in keys
+        if str(k).strip()
+    ]
 
     k_amt = k_line = None
     k_val = None
@@ -530,7 +562,7 @@ def extract_amount_from_lines(lines, keyword=None):
         candidate_indices = collect_candidate_indices(key_norm)
         if not candidate_indices:
             continue
-        amt, line, val = pick_best(candidate_indices)
+        amt, line, val = pick_best(candidate_indices, required_keywords=keys_norm)
         if not amt:
             continue
         current_val = val if val is not None else Decimal("0")
@@ -538,10 +570,13 @@ def extract_amount_from_lines(lines, keyword=None):
         if k_amt is None or current_val > stored_val:
             k_amt, k_line, k_val = amt, line, val
 
-    g_amt, g_line, g_val = pick_best(range(len(processed)))
-
     if k_amt:
         return k_amt, k_line
+
+    if keys:
+        return None, None
+
+    g_amt, g_line, _ = pick_best(range(len(processed)))
     if g_amt:
         return g_amt, g_line
 
