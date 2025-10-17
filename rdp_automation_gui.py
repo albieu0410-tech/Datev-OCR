@@ -212,6 +212,26 @@ def normalize_line(text: str) -> str:
     return t
 
 
+TOKEN_MATCH_TRANSLATE = str.maketrans(
+    {
+        "0": "o",
+        "1": "l",
+        "5": "s",
+        "7": "t",
+        "8": "b",
+        "9": "g",
+    }
+)
+
+
+def normalize_for_token_match(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text.translate(TOKEN_MATCH_TRANSLATE)
+
+
 AMOUNT_RE = re.compile(
     r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?:\s*(?:EUR|€))?",
     re.IGNORECASE,
@@ -1640,6 +1660,7 @@ class RDPApp(tk.Tk):
             for t in (self.includes_var.get() or "").split(",")
             if t.strip()
         ]
+        inc_match = [(tok, normalize_for_token_match(tok)) for tok in inc]
         exc = [
             t.strip().lower()
             for t in (self.excludes_var.get() or "").split(",")
@@ -1656,6 +1677,8 @@ class RDPApp(tk.Tk):
             norm = normalize_line(raw)
             low_raw = raw.lower()
             low_norm = norm.lower()
+            soft_raw = normalize_for_token_match(raw)
+            soft_norm = normalize_for_token_match(norm)
             if excl_k and re.match(r"^\s*k", low_raw):
                 debug_rows.append((raw, "excluded prefix 'K'"))
                 continue
@@ -1663,9 +1686,13 @@ class RDPApp(tk.Tk):
                 debug_rows.append((raw, "matched exclude token"))
                 continue
             matched_token = None
-            if inc:
-                for tok in inc:
-                    if tok in low_raw or tok in low_norm:
+            if inc_match:
+                fields = [f for f in (low_raw, low_norm, soft_raw, soft_norm) if f]
+                for tok, tok_soft in inc_match:
+                    if any(tok in field for field in fields):
+                        matched_token = tok
+                        break
+                    if tok_soft and any(tok_soft in field for field in fields):
                         matched_token = tok
                         break
             if inc and not matched_token:
@@ -1680,6 +1707,7 @@ class RDPApp(tk.Tk):
                     "h": h,
                     "raw": raw,
                     "token": matched_token or "",
+                    "soft": soft_raw,
                 }
             )
 
