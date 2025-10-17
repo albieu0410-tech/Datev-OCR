@@ -482,9 +482,12 @@ def extract_amount_from_lines(lines, keyword=None):
             ]
             if keyword_indices:
                 offsets = [0, 1, -1, 2, -2]
-                for offset in offsets:
-                    indices = [idx + offset for idx in keyword_indices]
-                    amt, line = pick_best(indices)
+                candidate_indices = []
+                for idx in keyword_indices:
+                    for offset in offsets:
+                        candidate_indices.append(idx + offset)
+                if candidate_indices:
+                    amt, line = pick_best(candidate_indices)
                     if amt:
                         return amt, line
 
