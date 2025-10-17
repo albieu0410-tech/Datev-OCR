@@ -540,10 +540,6 @@ def extract_amount_from_lines(lines, keyword=None):
 
     g_amt, g_line, g_val = pick_best(range(len(processed)))
 
-    if k_amt and g_amt:
-        if g_val and k_val and g_val > k_val:
-            return g_amt, g_line
-        return k_amt, k_line
     if k_amt:
         return k_amt, k_line
     if g_amt:
@@ -2506,6 +2502,8 @@ class RDPApp(tk.Tk):
         seen_keywords = set()
         for candidate in [
             term,
+            "Streitwert",
+            "Streitwertes",
             "Streitgegenstand",
             "Streitgegenstandes",
             "festgesetzt",
