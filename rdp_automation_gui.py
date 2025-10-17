@@ -56,6 +56,7 @@ DEFAULTS = {
     "doclist_region": [0.10, 0.24, 0.78, 0.50],  # list/table area with documents
     "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
     "pdf_hits_point": [0.08, 0.32],  # button inside the PDF hits pane
+    "pdf_hits_second_point": [0.08, 0.40],  # optional 2nd PDF result button
     "pdf_text_region": [0.20, 0.18, 0.74, 0.68],  # main page text area
     "includes": "Urt,SWB,SW",  # rows to include if they contain any of these
     "excludes": "SaM,KLE",  # rows to skip if they contain any of these
@@ -542,7 +543,7 @@ def extract_amount_from_lines(lines, keyword=None):
         best = None
         best_line = None
         best_value = None
-        best_priority = -1
+        best_score = None
         if isinstance(required_keywords, str):
             required_terms = [required_keywords.strip().lower()]
         else:
@@ -551,32 +552,79 @@ def extract_amount_from_lines(lines, keyword=None):
                 for term in (required_keywords or [])
                 if str(term).strip()
             ]
+
+        keyword_cache = {}
+
+        def keyword_info(line_norm):
+            cached = keyword_cache.get(line_norm)
+            if cached is not None:
+                return cached
+            compact = re.sub(r"\s+", "", line_norm)
+            norm_positions = []
+            compact_positions = []
+            for term in required_terms:
+                if not term:
+                    continue
+                idx_norm = line_norm.find(term)
+                if idx_norm != -1:
+                    norm_positions.append(idx_norm)
+                compact_term = term.replace(" ", "")
+                idx_compact = compact.find(compact_term)
+                if idx_compact != -1:
+                    compact_positions.append(idx_compact)
+            info = (compact, norm_positions, compact_positions)
+            keyword_cache[line_norm] = info
+            return info
+
         for idx in indices:
             for line_text, candidate in candidate_variants(idx) or []:
                 line_norm = (line_text or "").lower()
                 if required_terms:
-                    compact_line = re.sub(r"\s+", "", line_norm)
-                    has_keyword = any(
-                        term in line_norm or term.replace(" ", "") in compact_line
-                        for term in required_terms
+                    compact_line, norm_positions, compact_positions = keyword_info(
+                        line_norm
                     )
+                    has_keyword = bool(norm_positions or compact_positions)
                     if not has_keyword:
                         continue
                     priority = 1
                 else:
+                    compact_line = re.sub(r"\s+", "", line_norm)
+                    norm_positions = compact_positions = []
                     priority = 0
                 value = candidate.get("value")
                 if value is None:
                     continue
-                if (
-                    best is None
-                    or priority > best_priority
-                    or (priority == best_priority and value > best_value)
-                ):
+                distance_score = 0
+                after_keyword = 0
+                if required_terms:
+                    cand_norm = normalize_line_soft(candidate.get("display", "")).lower()
+                    cand_compact = re.sub(r"\s+", "", cand_norm)
+                    cand_idx = line_norm.find(cand_norm) if cand_norm else -1
+                    use_compact = False
+                    if cand_idx == -1 and cand_compact:
+                        cand_idx = compact_line.find(cand_compact)
+                        use_compact = True
+                    if (norm_positions or compact_positions) and cand_idx != -1:
+                        positions = norm_positions if not use_compact else compact_positions
+                        if not positions:
+                            positions = compact_positions if not use_compact else norm_positions
+                        diffs = [cand_idx - pos for pos in positions if cand_idx >= pos]
+                        if diffs:
+                            after_keyword = 1
+                            distance_score = -min(diffs)
+                        else:
+                            continue
+                score_tuple = (
+                    priority + after_keyword,
+                    after_keyword,
+                    distance_score,
+                    value,
+                )
+                if best_score is None or score_tuple > best_score:
                     best = candidate
                     best_line = line_text
                     best_value = value
-                    best_priority = priority
+                    best_score = score_tuple
         if best:
             return best.get("display"), best_line, best_value
         return None, None, None
@@ -854,6 +902,27 @@ class RDPApp(tk.Tk):
         ttk.Entry(
             cal2,
             textvariable=self.pdf_hits_var,
+            width=20,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=4)
+
+        cal2b = ttk.Frame(streit_frame)
+        cal2b.pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            cal2b,
+            text="Pick 2nd PDF Result Button",
+            command=self.pick_pdf_second_hits_point,
+        ).pack(side=tk.LEFT, padx=2)
+        hits2_pt = self.cfg.get("pdf_hits_second_point")
+        hits2_txt = (
+            f"{hits2_pt[0]:.3f}, {hits2_pt[1]:.3f}"
+            if isinstance(hits2_pt, (list, tuple)) and len(hits2_pt) == 2
+            else ""
+        )
+        self.pdf_hits2_var = tk.StringVar(value=hits2_txt)
+        ttk.Entry(
+            cal2b,
+            textvariable=self.pdf_hits2_var,
             width=20,
             state="readonly",
         ).pack(side=tk.LEFT, padx=4)
@@ -1394,6 +1463,22 @@ class RDPApp(tk.Tk):
             self.pdf_hits_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
         self.log_print(f"PDF hits button point set: {rel}")
 
+    def pick_pdf_second_hits_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        x, y = self._prompt_and_capture_point(
+            "Pick",
+            "Hover the PDF results button for the SECOND match, then confirm.",
+        )
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["pdf_hits_second_point"] = rel
+        if hasattr(self, "pdf_hits2_var"):
+            self.pdf_hits2_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
+        self.log_print(f"Secondary PDF hits button point set: {rel}")
+
     def pick_pdf_text_region(self):
         rb = self._two_click_box(
             "Hover TOP-LEFT of the PDF page text area, then OK.",
@@ -1830,6 +1915,7 @@ class RDPApp(tk.Tk):
             for t in (self.excludes_var.get() or "").split(",")
             if t.strip()
         ]
+        exc_match = [(tok, normalize_for_token_match(tok)) for tok in exc]
         excl_k = bool(self.exclude_k_var.get())
 
         matches = []
@@ -1846,9 +1932,19 @@ class RDPApp(tk.Tk):
             if excl_k and re.match(r"^\s*k", low_raw):
                 debug_rows.append((raw, "excluded prefix 'K'"))
                 continue
-            if exc and any(tok in low_raw or tok in low_norm for tok in exc):
-                debug_rows.append((raw, "matched exclude token"))
-                continue
+            if exc:
+                fields = [f for f in (low_raw, low_norm, soft_raw, soft_norm) if f]
+                excluded = False
+                for tok, tok_soft in exc_match:
+                    if any(tok in field for field in fields):
+                        excluded = True
+                        break
+                    if tok_soft and any(tok_soft in field for field in fields):
+                        excluded = True
+                        break
+                if excluded:
+                    debug_rows.append((raw, "matched exclude token"))
+                    continue
             matched_token = None
             if inc_match:
                 fields = [f for f in (low_raw, low_norm, soft_raw, soft_norm) if f]
@@ -2459,12 +2555,14 @@ class RDPApp(tk.Tk):
             pyautogui.press("enter")
         return True
 
-    def _click_pdf_result_button(self, prefix=""):
+    def _click_pdf_result_button(self, prefix="", which="primary"):
         if not self.current_rect:
             return False
-        point = self.cfg.get("pdf_hits_point")
+        key = "pdf_hits_point" if which != "secondary" else "pdf_hits_second_point"
+        label = "PDF result button" if which != "secondary" else "secondary PDF result button"
+        point = self.cfg.get(key)
         if not (isinstance(point, (list, tuple)) and len(point) == 2):
-            msg = "PDF results button point is not configured. Please calibrate it."
+            msg = f"{label.capitalize()} is not configured. Please calibrate it."
             self.log_print(f"{prefix}{msg}" if prefix else msg)
             return False
         try:
@@ -2472,7 +2570,7 @@ class RDPApp(tk.Tk):
         except Exception:
             pass
         hx, hy = rel_to_abs(self.current_rect, point)
-        self.log_print(f"{prefix}Clicking PDF result button at ({hx}, {hy}).")
+        self.log_print(f"{prefix}Clicking {label} at ({hx}, {hy}).")
         pyautogui.moveTo(hx, hy)
         pyautogui.click(hx, hy)
         wait_seconds = float(self.hitwait_var.get() or 1.0)
@@ -2563,37 +2661,24 @@ class RDPApp(tk.Tk):
                     time.sleep(wait_seconds)
                 self._wait_for_pdf_ready(prefix=prefix, reason="after PDF search")
 
+        try:
+            extra_wait = float(self.cfg.get("pdf_view_extra_wait", 2.0))
+        except Exception:
+            extra_wait = 2.0
+
         clicked_hits = self._click_pdf_result_button(prefix=prefix)
-        if not clicked_hits:
-            self.log_print(
-                f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
-            )
-        else:
-            try:
-                extra_wait = float(self.cfg.get("pdf_view_extra_wait", 2.0))
-            except Exception:
-                extra_wait = 2.0
+        if clicked_hits:
             if extra_wait > 0:
                 self.log_print(
                     f"{prefix}Waiting {extra_wait:.1f}s after PDF results click before checking overlays."
                 )
                 time.sleep(extra_wait)
-
-        reason = "after PDF results click" if clicked_hits else "before page OCR"
-        self._wait_for_pdf_ready(prefix=prefix, reason=reason)
-
-        page_img, page_scale = _grab_region_color_generic(
-            self.current_rect,
-            self.cfg["pdf_text_region"],
-            self.upscale_var.get(),
-        )
-        dft = do_ocr_data(
-            page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
-        )
-        lines_pg = lines_from_tsv(dft, scale=page_scale)
-        self.log_print(
-            f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
-        )
+            primary_reason = "after PDF results click"
+        else:
+            self.log_print(
+                f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
+            )
+            primary_reason = "before page OCR"
         keyword_candidates = []
         seen_keywords = set()
         for candidate in [
@@ -2617,14 +2702,57 @@ class RDPApp(tk.Tk):
                 continue
             seen_keywords.add(low)
             keyword_candidates.append(key)
-        amount, amount_line = extract_amount_from_lines(
-            lines_pg, keyword=keyword_candidates or None
-        )
-        if amount and prefix:
-            self.log_print(
-                f"{prefix}Matched Streitwert line: {amount_line or '(context unavailable)'}"
+        def extract_from_current_page(reason_label, attempt_label="primary"):
+            self._wait_for_pdf_ready(prefix=prefix, reason=reason_label)
+            page_img, page_scale = _grab_region_color_generic(
+                self.current_rect,
+                self.cfg["pdf_text_region"],
+                self.upscale_var.get(),
             )
-        return clean_amount_display(amount) if amount else None
+            dft = do_ocr_data(
+                page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+            )
+            lines_pg = lines_from_tsv(dft, scale=page_scale)
+            self.log_print(
+                f"{prefix}Page OCR lines captured ({attempt_label}): {len(lines_pg)}. Extracting amount."
+            )
+            amount_raw, amount_line = extract_amount_from_lines(
+                lines_pg, keyword=keyword_candidates or None
+            )
+            amount_clean = clean_amount_display(amount_raw) if amount_raw else None
+            if amount_clean and prefix:
+                suffix = f" [{attempt_label}]" if attempt_label else ""
+                self.log_print(
+                    f"{prefix}Matched Streitwert line{suffix}: {amount_line or '(context unavailable)'}"
+                )
+            return amount_clean
+
+        amount = extract_from_current_page(primary_reason, attempt_label="primary")
+        if amount:
+            return amount
+
+        second_point = self.cfg.get("pdf_hits_second_point")
+        if isinstance(second_point, (list, tuple)) and len(second_point) == 2:
+            self.log_print(
+                f"{prefix}Primary PDF result yielded no amount. Trying secondary result."
+            )
+            if self._click_pdf_result_button(prefix=prefix, which="secondary"):
+                if extra_wait > 0:
+                    self.log_print(
+                        f"{prefix}Waiting {extra_wait:.1f}s after secondary PDF result click."
+                    )
+                    time.sleep(extra_wait)
+                amount = extract_from_current_page(
+                    "after secondary PDF result click", attempt_label="secondary"
+                )
+                if amount:
+                    return amount
+            else:
+                self.log_print(
+                    f"{prefix}Secondary PDF result button not available; skipping fallback."
+                )
+
+        return None
 
     def _gather_aktenzeichen(self):
         try:
@@ -3311,6 +3439,18 @@ class RDPApp(tk.Tk):
                     self.pdf_hits_var.set(f"{hits_pt[0]:.3f}, {hits_pt[1]:.3f}")
                 else:
                     self.pdf_hits_var.set("")
+            hits2_pt = self.cfg.get("pdf_hits_second_point")
+            if hasattr(self, "pdf_hits2_var"):
+                if (
+                    isinstance(hits2_pt, (list, tuple))
+                    and len(hits2_pt) == 2
+                    and all(isinstance(v, (int, float)) for v in hits2_pt)
+                ):
+                    self.pdf_hits2_var.set(
+                        f"{hits2_pt[0]:.3f}, {hits2_pt[1]:.3f}"
+                    )
+                else:
+                    self.pdf_hits2_var.set("")
             view_pt = self.cfg.get("doc_view_point")
             if isinstance(view_pt, (list, tuple)) and len(view_pt) == 2:
                 self.doc_view_var.set(f"{view_pt[0]:.3f}, {view_pt[1]:.3f}")
