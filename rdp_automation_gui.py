@@ -2543,6 +2543,8 @@ class RDPApp(tk.Tk):
             "Streitgegenstandes",
             "festgesetzt",
             "festgesetzt auf",
+            "bis zu",
+            "biszu",
         ]:
             if candidate is None:
                 continue
