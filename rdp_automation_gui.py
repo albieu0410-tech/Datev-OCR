@@ -201,16 +201,39 @@ def find_green_band(color_img_pil):
 
 
 # ---------- OCR TSV helpers (Streitwert) ----------
+AMOUNT_TOKEN_TRANSLATE = str.maketrans(
+    {"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"}
+)
+
+
+def _translate_numeric_token(token: str) -> str:
+    if not token:
+        return token
+    if re.search(r"[0-9]", token):
+        return token.translate(AMOUNT_TOKEN_TRANSLATE)
+    if re.search(r"(EUR|€)", token, re.IGNORECASE):
+        return token.translate(AMOUNT_TOKEN_TRANSLATE)
+    return token
+
+
 def normalize_line(text: str) -> str:
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", str(text))
     text = text.replace("\u0080", "€")
-    fix = str.maketrans({"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"})
-    t = text.translate(fix)
-    t = re.sub(r"\s+", " ", t).strip()
-    t = re.sub(r"\beur\b", "EUR", t, flags=re.IGNORECASE)
-    return t
+    parts = re.split(r"(\s+)", text)
+    pieces = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isspace():
+            pieces.append(part)
+        else:
+            pieces.append(_translate_numeric_token(part))
+    joined = "".join(pieces)
+    joined = re.sub(r"\s+", " ", joined).strip()
+    joined = re.sub(r"\beur\b", "EUR", joined, flags=re.IGNORECASE)
+    return joined
 
 
 TOKEN_MATCH_TRANSLATE = str.maketrans(
@@ -427,34 +450,28 @@ def _grab_region_color_generic(current_rect, rel_box, upscale):
 
 
 # ---------- Normalization / parsing ----------
-DIGIT_FIX = str.maketrans(
-    {"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"}
-)
-
-
-def normalize_token_digits(tok: str) -> str:
-    return tok.translate(DIGIT_FIX)
-
-
 def normalize_line_soft(text: str) -> str:
     if not text:
-        return text
-    text = (
-        text.replace("0", "o")
-        .replace("O", "o")
-        .replace("1", "l")
-        .replace("5", "s")
-        .replace("B", "8")
-    )
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = text.replace("\u0080", "€")
     parts = re.split(r"(\s+)", text)
-    parts = [
-        normalize_token_digits(p) if i % 2 == 0 else p for i, p in enumerate(parts)
-    ]
-    t = "".join(parts)
-    t = re.sub(r"\s+", " ", t).strip()
-    t = re.sub(r"\beur\b", "EUR", t, flags=re.IGNORECASE)
-    t = re.sub(r"(\d+)\.(\d{2})\b", r"\1,\2", t)
-    return t
+    pieces = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isspace():
+            pieces.append(part)
+            continue
+        if re.search(r"[0-9]", part) or re.search(r"(EUR|€)", part, re.IGNORECASE):
+            pieces.append(_translate_numeric_token(part))
+        else:
+            pieces.append(part.lower())
+    joined = "".join(pieces)
+    joined = re.sub(r"\s+", " ", joined).strip()
+    joined = re.sub(r"\beur\b", "EUR", joined, flags=re.IGNORECASE)
+    joined = re.sub(r"(\d+)\.(\d{2})\b", r"\1,\2", joined)
+    return joined
 def extract_amount_from_lines(lines, keyword=None):
     if not lines:
         return None, None
