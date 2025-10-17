@@ -1,4 +1,5 @@
 import os, io, json, time, threading, re, unicodedata
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -212,7 +213,11 @@ def normalize_line(text: str) -> str:
 
 
 AMOUNT_RE = re.compile(
-    r"(?:€\s*)?(?:\d{1,3}(?:[.\s]\d{3})+|\d+),\d{2}(?:\s*(?:EUR|€))?",
+    r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+),\d{2}(?:\s*(?:EUR|€))?",
+    re.IGNORECASE,
+)
+AMOUNT_CANDIDATE_RE = re.compile(
+    r"(?:€\s*)?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[,\.]\d{2}|,-)(?:\s*(?:EUR|€))?",
     re.IGNORECASE,
 )
 DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
@@ -220,15 +225,11 @@ INVOICE_RE = re.compile(r"\b\d{6,}\b")
 
 
 def extract_amount_from_text(text: str):
-    t = normalize_line(text)
-    matches = list(AMOUNT_RE.finditer(t))
-    if not matches:
+    candidates = find_amount_candidates(text)
+    if not candidates:
         return None
-    for match in matches:
-        candidate = match.group(0).strip().strip(".,;: ")
-        if re.search(r"(EUR|€)", candidate, re.IGNORECASE):
-            return candidate
-    return matches[0].group(0).strip().strip(".,;: ")
+    best = max(candidates, key=lambda c: c["value"])
+    return best["display"] if best else None
 
 
 def clean_amount_display(amount: str) -> str:
@@ -248,6 +249,67 @@ def clean_amount_display(amount: str) -> str:
         if remainder and AMOUNT_RE.fullmatch(remainder):
             amt = remainder
     return amt
+
+
+def normalize_amount_candidate(raw_amount: str):
+    if not raw_amount:
+        return None
+    text = unicodedata.normalize("NFKC", str(raw_amount))
+    currency_match = re.search(r"(EUR|€)", text, re.IGNORECASE)
+    currency_suffix = ""
+    if currency_match:
+        symbol = currency_match.group(1)
+        currency_suffix = " EUR" if symbol.upper().startswith("EUR") else " €"
+    text = re.sub(r"(EUR|€)", "", text, flags=re.IGNORECASE)
+    text = text.replace("\u202f", " ").replace("\xa0", " ")
+    text = text.replace("−", "-")
+    text = text.replace("'", "").replace("`", "").replace("´", "")
+    text = text.strip()
+    text = re.sub(r",-+$", ",00", text)
+    if "," not in text and re.search(r"\.(\d{2})(?:$|\D)", text):
+        text = re.sub(r"\.(\d{2})(?:$|\D)", r",\1", text)
+    text = text.replace(" ", "")
+    text = re.sub(r"[^0-9,.-]", "", text)
+    sep_idx = max(text.rfind(","), text.rfind("."))
+    if sep_idx != -1:
+        integer_part = text[:sep_idx]
+        decimal_part = text[sep_idx + 1 :]
+    else:
+        integer_part = text
+        decimal_part = ""
+    integer_part = re.sub(r"[^0-9]", "", integer_part)
+    decimal_part = re.sub(r"[^0-9]", "", decimal_part)
+    if not integer_part:
+        integer_part = "0"
+    if not decimal_part:
+        decimal_part = "00"
+    elif len(decimal_part) == 1:
+        decimal_part = f"{decimal_part}0"
+    elif len(decimal_part) > 2:
+        decimal_part = decimal_part[:2]
+    try:
+        value = Decimal(f"{int(integer_part)}.{decimal_part}")
+    except (InvalidOperation, ValueError):
+        return None
+    formatted_int = f"{int(integer_part):,}".replace(",", ".")
+    formatted = f"{formatted_int},{decimal_part}"
+    if currency_suffix:
+        formatted = f"{formatted}{currency_suffix}"
+    return clean_amount_display(formatted), value
+
+
+def find_amount_candidates(text: str):
+    if not text:
+        return []
+    normalized = normalize_line(text)
+    candidates = []
+    for match in AMOUNT_CANDIDATE_RE.finditer(normalized):
+        parsed = normalize_amount_candidate(match.group(0))
+        if not parsed:
+            continue
+        display, value = parsed
+        candidates.append({"display": display, "value": value})
+    return candidates
 
 
 DOC_LOADING_PATTERNS = (
@@ -361,43 +423,53 @@ def extract_amount_from_lines(lines, keyword=None):
     processed = []
     for entry in lines:
         if isinstance(entry, (list, tuple)) and len(entry) == 5:
-            _, y, _, _, text = entry
+            x, y, w, h, text = entry
         else:
             y, text = entry
-        processed.append((y, text))
+            x = w = h = None
+        processed.append(
+            {
+                "y": y,
+                "text": text or "",
+                "norm": normalize_line_soft(text or ""),
+                "candidates": find_amount_candidates(text or ""),
+            }
+        )
 
-    norm_lines = [(y, normalize_line_soft(t)) for y, t in processed]
-
-    def find_amounts(text):
-        amts = AMOUNT_RE.findall(text)
-        non_zero = [
-            a for a in amts if not a.startswith("0,") and not a.startswith("0.")
-        ]
-        return non_zero if non_zero else amts
+    def pick_best(indices):
+        best = None
+        best_line = None
+        for idx in indices:
+            if idx < 0 or idx >= len(processed):
+                continue
+            info = processed[idx]
+            if not info["candidates"]:
+                continue
+            line_best = max(info["candidates"], key=lambda c: c["value"])
+            if best is None or line_best["value"] > best["value"]:
+                best = line_best
+                best_line = info["norm"]
+        if best:
+            return best["display"], best_line
+        return None, None
 
     if keyword:
-        k = normalize_line_soft(keyword.strip()).lower()
-        for idx, (_, t) in enumerate(norm_lines):
-            if k in t.lower():
-                amts = find_amounts(t)
-                if amts:
-                    return amts[-1], t
+        key = normalize_line_soft(keyword.strip()).lower()
+        if key:
+            keyword_indices = [
+                idx for idx, info in enumerate(processed) if key in info["norm"].lower()
+            ]
+            if keyword_indices:
+                offsets = [0, 1, -1, 2, -2]
+                for offset in offsets:
+                    indices = [idx + offset for idx in keyword_indices]
+                    amt, line = pick_best(indices)
+                    if amt:
+                        return amt, line
 
-    if keyword:
-        k = normalize_line_soft(keyword.strip()).lower()
-        for idx, (_, t) in enumerate(norm_lines):
-            if k in t.lower():
-                for offset in [0, 1, -1]:
-                    check_idx = idx + offset
-                    if 0 <= check_idx < len(norm_lines):
-                        amts = find_amounts(norm_lines[check_idx][1])
-                        if amts:
-                            return amts[-1], norm_lines[check_idx][1]
-
-    for _, t in norm_lines:
-        amts = find_amounts(t)
-        if amts:
-            return amts[-1], t
+    amt, line = pick_best(range(len(processed)))
+    if amt:
+        return amt, line
 
     return None, None
 
@@ -2305,9 +2377,12 @@ class RDPApp(tk.Tk):
         self.log_print(
             f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
         )
-        combined = "\n".join(normalize_line(t) for _, _, _, _, t in lines_pg)
-        amt = extract_amount_from_text(combined)
-        return clean_amount_display(amt) if amt else None
+        amount, amount_line = extract_amount_from_lines(lines_pg, keyword=term)
+        if amount and prefix:
+            self.log_print(
+                f"{prefix}Matched Streitwert line: {amount_line or '(context unavailable)'}"
+            )
+        return clean_amount_display(amount) if amount else None
 
     def _gather_aktenzeichen(self):
         try:
