@@ -1764,21 +1764,17 @@ class RDPApp(tk.Tk):
             key=lambda m: (m.get("y", 0), m.get("x", 0)),
         )
 
-        remaining = []
-        skipped = False
-        for match in ordered:
-            if not skipped and match is top_match:
-                skipped = True
-                continue
-            remaining.append(match)
+        remaining = [match for match in ordered if match is not top_match]
+        self.log_print(
+            f"{prefix}Ignoring top doc row match: {top_match.get('raw', '')}"
+        )
 
-        if remaining:
+        if not remaining:
             self.log_print(
-                f"{prefix}Ignoring top doc row match: {top_match.get('raw', '')}"
+                f"{prefix}No remaining Streitwert matches after ignoring top row."
             )
-            return remaining
 
-        return ordered
+        return remaining
 
     def _doclist_abs_rect(self):
         if not self.current_rect:
