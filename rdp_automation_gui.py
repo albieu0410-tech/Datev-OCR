@@ -475,6 +475,52 @@ def extract_amount_from_lines(lines, keyword=None):
             }
         )
 
+    combo_cache = {}
+
+    def combo_info(idx, span):
+        key = (idx, span)
+        if key in combo_cache:
+            return combo_cache[key]
+        parts_text = []
+        for offset in range(span):
+            j = idx + offset
+            if j >= len(processed):
+                combo_cache[key] = ("", [])
+                return combo_cache[key]
+            parts_text.append(processed[j]["text"])
+        combined_text = " ".join(part for part in parts_text if part).strip()
+        combined_norm = normalize_line_soft(combined_text) if combined_text else ""
+        if not combined_norm:
+            combo_cache[key] = ("", [])
+            return combo_cache[key]
+        combo_cache[key] = (
+            combined_norm,
+            find_amount_candidates(combined_text),
+        )
+        return combo_cache[key]
+
+    def candidate_variants(idx):
+        if idx < 0 or idx >= len(processed):
+            return
+        info = processed[idx]
+        seen = set()
+        for cand in info["candidates"]:
+            key = (cand["display"], cand["value"])
+            if key in seen:
+                continue
+            seen.add(key)
+            yield info["norm"], cand
+        for span in (2, 3):
+            combined_norm, combo_candidates = combo_info(idx, span)
+            if not combo_candidates:
+                continue
+            for cand in combo_candidates:
+                key = (cand["display"], cand["value"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield combined_norm, cand
+
     def pick_best(indices, required_keywords=None):
         best = None
         best_line = None
@@ -489,35 +535,33 @@ def extract_amount_from_lines(lines, keyword=None):
                 if str(term).strip()
             ]
         for idx in indices:
-            if idx < 0 or idx >= len(processed):
-                continue
-            info = processed[idx]
-            if not info["candidates"]:
-                continue
-            line_norm = info["norm"].lower()
-            if required_terms:
-                compact_line = re.sub(r"\s+", "", line_norm)
-                has_keyword = any(
-                    term in line_norm or term.replace(" ", "") in compact_line
-                    for term in required_terms
-                )
-                if not has_keyword:
+            for line_text, candidate in candidate_variants(idx) or []:
+                line_norm = (line_text or "").lower()
+                if required_terms:
+                    compact_line = re.sub(r"\s+", "", line_norm)
+                    has_keyword = any(
+                        term in line_norm or term.replace(" ", "") in compact_line
+                        for term in required_terms
+                    )
+                    if not has_keyword:
+                        continue
+                    priority = 1
+                else:
+                    priority = 0
+                value = candidate.get("value")
+                if value is None:
                     continue
-                priority = 1
-            else:
-                priority = 0
-            line_best = max(info["candidates"], key=lambda c: c["value"])
-            if (
-                best is None
-                or priority > best_priority
-                or (priority == best_priority and line_best["value"] > best_value)
-            ):
-                best = line_best
-                best_line = info["norm"]
-                best_value = line_best["value"]
-                best_priority = priority
+                if (
+                    best is None
+                    or priority > best_priority
+                    or (priority == best_priority and value > best_value)
+                ):
+                    best = candidate
+                    best_line = line_text
+                    best_value = value
+                    best_priority = priority
         if best:
-            return best["display"], best_line, best_value
+            return best.get("display"), best_line, best_value
         return None, None, None
 
     if isinstance(keyword, (list, tuple, set)):
