@@ -2504,7 +2504,13 @@ class RDPApp(tk.Tk):
         )
         keyword_candidates = []
         seen_keywords = set()
-        for candidate in [term, "Streitgegenstand", "Streitgegenstandes"]:
+        for candidate in [
+            term,
+            "Streitgegenstand",
+            "Streitgegenstandes",
+            "festgesetzt",
+            "festgesetzt auf",
+        ]:
             if candidate is None:
                 continue
             key = str(candidate).strip()
