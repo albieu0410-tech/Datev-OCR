@@ -68,6 +68,7 @@ DEFAULTS = {
     "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
     "pdf_close_point": [0.97, 0.05],  # close button for the PDF viewer window
     "streitwert_overlay_skip_waits": False,  # rely solely on overlay detection delays
+    "ignore_top_doc_row": False,  # skip the first/topmost Streitwert match
     # --- Rechnungen workflow (NEW) ---
     "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
@@ -781,6 +782,15 @@ class RDPApp(tk.Tk):
             text="Exclude rows starting with 'K'",
             variable=self.exclude_k_var,
         ).pack(anchor="w", pady=(6, 0))
+
+        self.ignore_top_doc_row_var = tk.BooleanVar(
+            value=self.cfg.get("ignore_top_doc_row", False)
+        )
+        ttk.Checkbutton(
+            streit_frame,
+            text="Ignore first doc row match",
+            variable=self.ignore_top_doc_row_var,
+        ).pack(anchor="w")
 
         row3 = ttk.Frame(streit_frame)
         row3.pack(anchor="w", pady=(6, 0))
@@ -1741,6 +1751,35 @@ class RDPApp(tk.Tk):
 
         return ordered
 
+    def _apply_ignore_top_doc_row(self, ordered, prefix=""):
+        if (
+            not ordered
+            or not hasattr(self, "ignore_top_doc_row_var")
+            or not bool(self.ignore_top_doc_row_var.get())
+        ):
+            return ordered
+
+        top_match = min(
+            ordered,
+            key=lambda m: (m.get("y", 0), m.get("x", 0)),
+        )
+
+        remaining = []
+        skipped = False
+        for match in ordered:
+            if not skipped and match is top_match:
+                skipped = True
+                continue
+            remaining.append(match)
+
+        if remaining:
+            self.log_print(
+                f"{prefix}Ignoring top doc row match: {top_match.get('raw', '')}"
+            )
+            return remaining
+
+        return ordered
+
     def _doclist_abs_rect(self):
         if not self.current_rect:
             return None
@@ -2574,6 +2613,9 @@ class RDPApp(tk.Tk):
                 lines = lines_from_tsv(df, scale=doc_scale)
                 matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
                 ordered = self._prioritize_streitwert_matches(matches, inc)
+                ordered = self._apply_ignore_top_doc_row(
+                    ordered, prefix=prefix
+                )
 
                 if not ordered:
                     reason = ", ".join(
@@ -2720,6 +2762,9 @@ class RDPApp(tk.Tk):
             lines = lines_from_tsv(df, scale=doc_scale)
             matches, inc, exc, debug_rows = self._filter_streitwert_rows(lines)
             ordered = self._prioritize_streitwert_matches(matches, inc)
+            ordered = self._apply_ignore_top_doc_row(
+                ordered, prefix="[Test] "
+            )
 
             self.log_print(
                 f"[Test] Doc list OCR lines: {len(lines)} | includes: {inc or ['(none)']} | excludes: {exc or ['(none)']}"
@@ -2967,6 +3012,12 @@ class RDPApp(tk.Tk):
         self.cfg["includes"] = self.includes_var.get().strip()
         self.cfg["excludes"] = self.excludes_var.get().strip()
         self.cfg["exclude_prefix_k"] = bool(self.exclude_k_var.get())
+        if hasattr(self, "ignore_top_doc_row_var"):
+            self.cfg["ignore_top_doc_row"] = bool(
+                self.ignore_top_doc_row_var.get()
+            )
+        else:
+            self.cfg["ignore_top_doc_row"] = False
         self.cfg["streitwert_term"] = (
             self.streitwort_var.get().strip() or "Streitwert"
         )
@@ -3026,6 +3077,10 @@ class RDPApp(tk.Tk):
             self.includes_var.set(self.cfg.get("includes", "Urt,SWB,SW"))
             self.excludes_var.set(self.cfg.get("excludes", "SaM,KLE"))
             self.exclude_k_var.set(self.cfg.get("exclude_prefix_k", True))
+            if hasattr(self, "ignore_top_doc_row_var"):
+                self.ignore_top_doc_row_var.set(
+                    self.cfg.get("ignore_top_doc_row", False)
+                )
             self.streitwort_var.set(
                 self.cfg.get("streitwert_term", "Streitwert")
             )
