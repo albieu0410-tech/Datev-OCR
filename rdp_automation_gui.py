@@ -494,28 +494,49 @@ def extract_amount_from_lines(lines, keyword=None):
             return best["display"], best_line, best_value
         return None, None, None
 
-    if keyword:
-        key = normalize_line_soft(keyword.strip()).lower()
-        if key:
-            keyword_indices = [
-                idx for idx, info in enumerate(processed) if key in info["norm"].lower()
-            ]
-            if keyword_indices:
-                offsets = [0, 1, -1, 2, -2]
-                candidate_indices = []
-                for idx in keyword_indices:
-                    for offset in offsets:
-                        candidate_indices.append(idx + offset)
-                if candidate_indices:
-                    k_amt, k_line, k_val = pick_best(candidate_indices)
-                else:
-                    k_amt = k_line = k_val = None
-            else:
-                k_amt = k_line = k_val = None
-        else:
-            k_amt = k_line = k_val = None
+    if isinstance(keyword, (list, tuple, set)):
+        keys = [str(k) for k in keyword if k is not None and str(k).strip()]
+    elif keyword:
+        keys = [str(keyword)]
     else:
-        k_amt = k_line = k_val = None
+        keys = []
+
+    k_amt = k_line = None
+    k_val = None
+
+    def collect_candidate_indices(key_norm):
+        keyword_indices = [
+            idx for idx, info in enumerate(processed) if key_norm in info["norm"].lower()
+        ]
+        if not keyword_indices:
+            return []
+        offsets = [0, 1, -1, 2, -2]
+        candidate_indices = []
+        for idx in keyword_indices:
+            for offset in offsets:
+                candidate_indices.append(idx + offset)
+        seen = set()
+        ordered = []
+        for idx in candidate_indices:
+            if idx not in seen:
+                seen.add(idx)
+                ordered.append(idx)
+        return ordered
+
+    for key in keys:
+        key_norm = normalize_line_soft(str(key).strip()).lower()
+        if not key_norm:
+            continue
+        candidate_indices = collect_candidate_indices(key_norm)
+        if not candidate_indices:
+            continue
+        amt, line, val = pick_best(candidate_indices)
+        if not amt:
+            continue
+        current_val = val if val is not None else Decimal("0")
+        stored_val = k_val if k_val is not None else Decimal("0")
+        if k_amt is None or current_val > stored_val:
+            k_amt, k_line, k_val = amt, line, val
 
     g_amt, g_line, g_val = pick_best(range(len(processed)))
 
@@ -2481,7 +2502,22 @@ class RDPApp(tk.Tk):
         self.log_print(
             f"{prefix}Page OCR lines captured: {len(lines_pg)}. Extracting amount."
         )
-        amount, amount_line = extract_amount_from_lines(lines_pg, keyword=term)
+        keyword_candidates = []
+        seen_keywords = set()
+        for candidate in [term, "Streitgegenstand", "Streitgegenstandes"]:
+            if candidate is None:
+                continue
+            key = str(candidate).strip()
+            if not key:
+                continue
+            low = key.lower()
+            if low in seen_keywords:
+                continue
+            seen_keywords.add(low)
+            keyword_candidates.append(key)
+        amount, amount_line = extract_amount_from_lines(
+            lines_pg, keyword=keyword_candidates or None
+        )
         if amount and prefix:
             self.log_print(
                 f"{prefix}Matched Streitwert line: {amount_line or '(context unavailable)'}"
