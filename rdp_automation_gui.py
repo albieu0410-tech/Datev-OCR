@@ -319,17 +319,35 @@ def normalize_amount_candidate(raw_amount: str):
     return clean_amount_display(formatted), value
 
 
+def _amount_search_variants(normalized: str):
+    variants = {normalized}
+    if not normalized:
+        return variants
+    compact_decimal = re.sub(r"([.,])\s+(?=\d)", r"\1", normalized)
+    variants.add(compact_decimal)
+    compact_digits = re.sub(r"(?<=\d)\s+(?=\d)", "", compact_decimal)
+    variants.add(compact_digits)
+    variants.add(re.sub(r"\s+(?=(?:EUR|€)\b)", " ", compact_digits))
+    return {v for v in variants if v}
+
+
 def find_amount_candidates(text: str):
     if not text:
         return []
     normalized = normalize_line(text)
+    seen = set()
     candidates = []
-    for match in AMOUNT_CANDIDATE_RE.finditer(normalized):
-        parsed = normalize_amount_candidate(match.group(0))
-        if not parsed:
-            continue
-        display, value = parsed
-        candidates.append({"display": display, "value": value})
+    for variant in _amount_search_variants(normalized):
+        for match in AMOUNT_CANDIDATE_RE.finditer(variant):
+            parsed = normalize_amount_candidate(match.group(0))
+            if not parsed:
+                continue
+            display, value = parsed
+            key = (display, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"display": display, "value": value})
     return candidates
 
 
@@ -460,6 +478,7 @@ def extract_amount_from_lines(lines, keyword=None):
     def pick_best(indices):
         best = None
         best_line = None
+        best_value = None
         for idx in indices:
             if idx < 0 or idx >= len(processed):
                 continue
@@ -467,12 +486,13 @@ def extract_amount_from_lines(lines, keyword=None):
             if not info["candidates"]:
                 continue
             line_best = max(info["candidates"], key=lambda c: c["value"])
-            if best is None or line_best["value"] > best["value"]:
+            if best is None or line_best["value"] > best_value:
                 best = line_best
                 best_line = info["norm"]
+                best_value = line_best["value"]
         if best:
-            return best["display"], best_line
-        return None, None
+            return best["display"], best_line, best_value
+        return None, None, None
 
     if keyword:
         key = normalize_line_soft(keyword.strip()).lower()
@@ -487,13 +507,31 @@ def extract_amount_from_lines(lines, keyword=None):
                     for offset in offsets:
                         candidate_indices.append(idx + offset)
                 if candidate_indices:
-                    amt, line = pick_best(candidate_indices)
-                    if amt:
-                        return amt, line
+                    k_amt, k_line, k_val = pick_best(candidate_indices)
+                else:
+                    k_amt = k_line = k_val = None
+            else:
+                k_amt = k_line = k_val = None
+        else:
+            k_amt = k_line = k_val = None
+    else:
+        k_amt = k_line = k_val = None
 
-    amt, line = pick_best(range(len(processed)))
-    if amt:
-        return amt, line
+    g_amt, g_line, g_val = pick_best(range(len(processed)))
+
+    if k_amt and g_amt:
+        if g_val and k_val and g_val > k_val:
+            return g_amt, g_line
+        return k_amt, k_line
+    if k_amt:
+        return k_amt, k_line
+    if g_amt:
+        return g_amt, g_line
+
+    combined_text = "\n".join(info["norm"] for info in processed if info["norm"]) or ""
+    fallback = extract_amount_from_text(combined_text)
+    if fallback:
+        return fallback, combined_text
 
     return None, None
 
