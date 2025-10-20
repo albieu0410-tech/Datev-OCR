@@ -78,6 +78,8 @@ DEFAULTS = {
     "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
     "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+    "log_folder": LOG_DIR,
+    "log_extract_results_csv": "streitwert_log_extract.csv",
 }
 CFG_FILE = "rdp_automation_config.json"
 
@@ -464,6 +466,85 @@ def find_amount_candidates(text: str):
     return candidates
 
 
+def build_streitwert_keywords(term):
+    seen_keywords = set()
+    keyword_candidates = []
+    for candidate in [
+        term,
+        "Streitwert",
+        "Streitwertes",
+        "Streitwerts",
+        "Streitgegenstand",
+        "Streitgegenstandes",
+        "Streitwert des Verfahrens",
+        "Der Streitwert des Verfahrens",
+        "Der Streitwert des Verfahrens wird",
+        "Der Streitwert des Verfahrens wird auf",
+        "Der Streitwert des Verfahrens wird auf bis zu",
+        "Streitwert wurde",
+        "Streitwert wird",
+        "Streitwert wird auf",
+        "Streitwert wird auf bis zu",
+        "Streitwert wird bis",
+        "Streitwert wird bis zu",
+        "Der Streitwert wird auf",
+        "Der Streitwert wird auf bis zu",
+        "Der Streitwert wird bis",
+        "Der Streitwert wird bis zu",
+        "Die Streitwertfestsetzung",
+        "Die Streitwertfestsetzung hatte",
+        "Die Streitwertfestsetzung hatte einheitlich",
+        "Die Streitwertfestsetzung hatte einheitlich auf",
+        "Die Streitwertfestsetzung hatte einheitlich auf bis zu",
+        "Streitwertfestsetzung",
+        "Streitwertfestsetzung hatte",
+        "Streitwertfestsetzung hatte einheitlich",
+        "Streitwertfestsetzung hatte einheitlich auf",
+        "Streitwertfestsetzung hatte einheitlich auf bis zu",
+        "Streitwert beträgt",
+        "Streitwert bis",
+        "Streitwert bis Euro",
+        "Streitwert bis EUR",
+        "Streitwert bis zu",
+        "Streitwert bis zu EUR",
+        "Streitwert bis zu Euro",
+        "wird auf",
+        "wird vorläufig",
+        "wird vorläufig auf",
+        "wird vorlaufig",
+        "wird vorlaufig auf",
+        "der wird auf",
+        "der wird vorläufig",
+        "der wird vorläufig auf",
+        "der wird vorlaufig",
+        "der wird vorlaufig auf",
+        "wird auf bis",
+        "wird auf bis zu",
+        "wird bis",
+        "wird bis zu",
+        "der wird bis",
+        "der wird bis zu",
+        "festgesetzt",
+        "festgesetzt auf",
+        "bis zu",
+        "biszu",
+        "bis euro",
+        "gesetzt",
+        "beträgt",
+    ]:
+        if candidate is None:
+            continue
+        key = str(candidate).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen_keywords:
+            continue
+        seen_keywords.add(low)
+        keyword_candidates.append(key)
+    return keyword_candidates
+
+
 DOC_LOADING_PATTERNS = (
     "dokumente werden geladen",
     "dokumente werden gel",
@@ -487,6 +568,12 @@ DOC_LOADING_PATTERNS = (
     "lade datei",
     "laden",
 )
+
+LOG_SECTION_RE = re.compile(r"^\s*\[[^\]]*\]\s*Section:\s*(.+)$", re.IGNORECASE)
+LOG_ENTRY_RE = re.compile(r"^\s*(\d{3}):\s*\(([^)]*)\)\s*->\s*(.*)$")
+LOG_SOFT_RE = re.compile(r"^\s*soft:\s*(.*)$", re.IGNORECASE)
+LOG_NORM_RE = re.compile(r"^\s*norm:\s*(.*)$", re.IGNORECASE)
+LOG_KEYWORD_RE = re.compile(r"^\s*Keywords:\s*(.*)$", re.IGNORECASE)
 
 
 def lines_from_tsv(tsv_df, scale=1):
@@ -872,12 +959,14 @@ class RDPApp(tk.Tk):
         calibration_tab = ttk.Frame(notebook)
         streit_tab = ttk.Frame(notebook)
         rechn_tab = ttk.Frame(notebook)
+        log_tab = ttk.Frame(notebook)
         ocr_tab = ttk.Frame(notebook)
 
         notebook.add(general_tab, text="General")
         notebook.add(calibration_tab, text="Calibration")
         notebook.add(streit_tab, text="Streitwert")
         notebook.add(rechn_tab, text="Rechnungen")
+        notebook.add(log_tab, text="Log")
         notebook.add(ocr_tab, text="OCR / Profiles")
 
         # --- General tab: RDP, Excel, timing ---
@@ -1328,6 +1417,53 @@ class RDPApp(tk.Tk):
             command=self.run_rechnungen_only_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
+        # --- Log tab ---
+        log_frame = ttk.LabelFrame(log_tab, text="Streitwert Log Extraction")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+
+        ttk.Label(log_frame, text="Log folder").pack(anchor="w")
+        log_dir_row = ttk.Frame(log_frame)
+        log_dir_row.pack(anchor="w", fill=tk.X, pady=(0, 4))
+        self.log_dir_var = tk.StringVar(
+            value=self.cfg.get("log_folder", LOG_DIR)
+        )
+        ttk.Entry(
+            log_dir_row,
+            textvariable=self.log_dir_var,
+            width=42,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            log_dir_row,
+            text="Browse",
+            command=self.browse_log_dir,
+        ).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(log_frame, text="Output CSV").pack(anchor="w")
+        self.log_extract_csv_var = tk.StringVar(
+            value=self.cfg.get(
+                "log_extract_results_csv", "streitwert_log_extract.csv"
+            )
+        )
+        ttk.Entry(
+            log_frame, textvariable=self.log_extract_csv_var, width=40
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Button(
+            log_frame,
+            text="Extract Streitwert from Logs",
+            command=self.run_log_extraction_threaded,
+        ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Label(
+            log_frame,
+            text=(
+                "Parses saved OCR logs and records the first detected Streitwert "
+                "amount per file."
+            ),
+            wraplength=320,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(6, 0))
+
         # --- OCR / Profiles tab ---
         ocr_options = ttk.LabelFrame(ocr_tab, text="OCR Options")
         ocr_options.pack(fill=tk.X, pady=4)
@@ -1489,6 +1625,11 @@ class RDPApp(tk.Tk):
         )
         if path:
             self.tess_var.set(path)
+
+    def browse_log_dir(self):
+        path = filedialog.askdirectory(title="Select log folder")
+        if path:
+            self.log_dir_var.set(path)
 
     def connect_rdp(self):
         try:
@@ -2069,6 +2210,224 @@ class RDPApp(tk.Tk):
 
         except Exception as e:
             self.log_print(f"[Rechnungen] ERROR: {e!r}")
+
+    def run_log_extraction_threaded(self):
+        t = threading.Thread(target=self.run_log_extraction, daemon=True)
+        t.start()
+
+    def run_log_extraction(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+
+            log_dir = (self.log_dir_var.get() or "").strip() or LOG_DIR
+            if not os.path.isdir(log_dir):
+                ensure_log_dir()
+                if not os.path.isdir(log_dir):
+                    self.log_print(
+                        f"[Log Extract] Log directory not found: {log_dir}"
+                    )
+                    return
+
+            files = [
+                os.path.join(log_dir, name)
+                for name in sorted(os.listdir(log_dir))
+                if name.lower().endswith(".log")
+            ]
+            if not files:
+                self.log_print(
+                    f"[Log Extract] No .log files found in {os.path.abspath(log_dir)}"
+                )
+                return
+
+            output_csv = (self.log_extract_csv_var.get() or "").strip()
+            self.log_print(
+                f"[Log Extract] Processing {len(files)} log file(s) from {os.path.abspath(log_dir)}"
+            )
+
+            results = []
+            fallback_keywords = build_streitwert_keywords(
+                self.streitwort_var.get().strip() or "Streitwert"
+            )
+
+            for path in files:
+                label = self._log_label_from_filename(os.path.basename(path))
+                amount, context, section = self._extract_amount_from_log(
+                    path, fallback_keywords
+                )
+                display_label = label or os.path.basename(path)
+                if amount:
+                    results.append(
+                        {
+                            "log_file": os.path.basename(path),
+                            "label": label,
+                            "amount": amount,
+                            "section": section or "",
+                            "context": context or "",
+                        }
+                    )
+                    self.log_print(
+                        f"[Log Extract] {display_label} → {amount} ({section or 'section unknown'})"
+                    )
+                else:
+                    self.log_print(f"[Log Extract] {display_label} → (none)")
+
+            if results and output_csv:
+                try:
+                    pd.DataFrame(results).to_csv(
+                        output_csv, index=False, encoding="utf-8-sig"
+                    )
+                    self.log_print(
+                        f"[Log Extract] Saved {len(results)} entries to {output_csv}"
+                    )
+                except Exception as exc:
+                    self.log_print(
+                        f"[Log Extract] Failed to write CSV '{output_csv}': {exc}"
+                    )
+            elif results:
+                self.log_print(
+                    f"[Log Extract] Collected {len(results)} entries (CSV output disabled)."
+                )
+            else:
+                self.log_print("[Log Extract] No Streitwert amounts were detected in the logs.")
+        except Exception as e:
+            self.log_print(f"[Log Extract] ERROR: {e}")
+
+    def _log_label_from_filename(self, filename):
+        base = os.path.splitext(filename)[0]
+        m = re.match(r"^\d{8}-\d{6}_(.+)$", base)
+        if m:
+            base = m.group(1)
+        label = base.replace("__", " – ")
+        label = label.replace("_", " ")
+        return label.strip()
+
+    def _parse_log_file_sections(self, path):
+        sections = []
+        current_section = ""
+        current_entries = []
+        current_keywords = []
+        last_coords = (0, 0, 0, 0)
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    line = raw_line.rstrip("\n")
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+
+                    sec_match = LOG_SECTION_RE.match(stripped)
+                    if sec_match:
+                        if current_entries:
+                            sections.append(
+                                {
+                                    "section": current_section,
+                                    "entries": list(current_entries),
+                                    "keywords": list(current_keywords),
+                                }
+                            )
+                        current_section = sec_match.group(1).strip()
+                        current_entries = []
+                        current_keywords = []
+                        last_coords = (0, 0, 0, 0)
+                        continue
+
+                    kw_match = LOG_KEYWORD_RE.match(stripped)
+                    if kw_match:
+                        keywords = [
+                            k.strip() for k in kw_match.group(1).split(",") if k.strip()
+                        ]
+                        current_keywords = keywords
+                        continue
+
+                    entry_match = LOG_ENTRY_RE.match(line)
+                    if entry_match:
+                        coords_text = entry_match.group(2)
+                        coords_parts = [c.strip() for c in coords_text.split(",")]
+                        if len(coords_parts) >= 4:
+                            try:
+                                x = int(coords_parts[0])
+                                y = int(coords_parts[1])
+                                w = int(coords_parts[2])
+                                h = int(coords_parts[3])
+                            except Exception:
+                                x = y = w = h = 0
+                        else:
+                            x = y = w = h = 0
+                        text = entry_match.group(3).strip()
+                        current_entries.append((x, y, w, h, text))
+                        last_coords = (x, y, w, h)
+                        continue
+
+                    soft_match = LOG_SOFT_RE.match(line)
+                    if soft_match and current_entries:
+                        text = soft_match.group(1).strip()
+                        if text:
+                            x, y, w, h = last_coords
+                            current_entries.append((x, y, w, h, text))
+                        continue
+
+                    norm_match = LOG_NORM_RE.match(line)
+                    if norm_match and current_entries:
+                        text = norm_match.group(1).strip()
+                        if text:
+                            x, y, w, h = last_coords
+                            current_entries.append((x, y, w, h, text))
+                        continue
+        except Exception as exc:
+            self.log_print(f"[Log Extract] Failed to read log '{path}': {exc}")
+            return []
+
+        if current_entries:
+            sections.append(
+                {
+                    "section": current_section,
+                    "entries": list(current_entries),
+                    "keywords": list(current_keywords),
+                }
+            )
+
+        return sections
+
+    def _extract_amount_from_log(self, path, fallback_keywords):
+        sections = self._parse_log_file_sections(path)
+        if not sections:
+            return None, None, None
+
+        for info in sections:
+            entries = info.get("entries") or []
+            if not entries:
+                continue
+            keywords = info.get("keywords") or fallback_keywords
+            amount, line = extract_amount_from_lines(
+                entries,
+                keyword=keywords,
+                min_value=STREITWERT_MIN_AMOUNT,
+            )
+            if not amount and keywords is not fallback_keywords:
+                amount, line = extract_amount_from_lines(
+                    entries,
+                    keyword=fallback_keywords,
+                    min_value=STREITWERT_MIN_AMOUNT,
+                )
+            if amount:
+                return clean_amount_display(amount), line, info.get("section")
+
+        combined_entries = []
+        for info in sections:
+            combined_entries.extend(info.get("entries") or [])
+
+        if combined_entries:
+            amount, line = extract_amount_from_lines(
+                combined_entries,
+                keyword=fallback_keywords,
+                min_value=STREITWERT_MIN_AMOUNT,
+            )
+            if amount:
+                return clean_amount_display(amount), line, "combined"
+
+        return None, None, None
 
     def run_streitwert_threaded(self):
         t = threading.Thread(target=self.run_streitwert, daemon=True)
@@ -2876,78 +3235,7 @@ class RDPApp(tk.Tk):
                 f"{prefix}Skipped PDF results click; proceeding directly to page OCR."
             )
             primary_reason = "before page OCR"
-        keyword_candidates = []
-        seen_keywords = set()
-        for candidate in [
-            term,
-            "Streitwert", 
-            "Streitwertes", 
-            "Streitwerts", 
-            "Streitgegenstand", 
-            "Streitgegenstandes", 
-            "Streitwert des Verfahrens", 
-            "Der Streitwert des Verfahrens", 
-            "Der Streitwert des Verfahrens wird", 
-            "Der Streitwert des Verfahrens wird auf", 
-            "Der Streitwert des Verfahrens wird auf bis zu", 
-            "Streitwert wurde", 
-            "Streitwert wird", 
-            "Streitwert wird auf", 
-            "Streitwert wird auf bis zu", 
-            "Streitwert wird bis", 
-            "Streitwert wird bis zu",
-            "Der Streitwert wird auf",
-            "Der Streitwert wird auf bis zu",
-            "Der Streitwert wird bis",
-            "Der Streitwert wird bis zu",
-            "Die Streitwertfestsetzung", 
-            "Die Streitwertfestsetzung hatte", 
-            "Die Streitwertfestsetzung hatte einheitlich", 
-            "Die Streitwertfestsetzung hatte einheitlich auf", 
-            "Die Streitwertfestsetzung hatte einheitlich auf bis zu", 
-            "Streitwertfestsetzung", 
-            "Streitwertfestsetzung hatte", 
-            "Streitwertfestsetzung hatte einheitlich", 
-            "Streitwertfestsetzung hatte einheitlich auf", 
-            "Streitwertfestsetzung hatte einheitlich auf bis zu", 
-            "Streitwert beträgt", 
-            "Streitwert bis", 
-            "Streitwert bis Euro", 
-            "Streitwert bis EUR", 
-            "wird auf", 
-            "wird vorläufig",
-            "wird vorläufig auf",
-            "wird vorlaufig",
-            "wird vorlaufig auf",
-            "der wird auf",
-            "der wird vorläufig",
-            "der wird vorläufig auf",
-            "der wird vorlaufig",
-            "der wird vorlaufig auf",
-            "wird auf bis",
-            "wird auf bis zu",
-            "wird bis",
-            "wird bis zu",
-            "der wird bis",
-            "der wird bis zu",
-            "festgesetzt",
-            "festgesetzt auf",
-            "bis zu",
-            "biszu",
-            "bis euro",
-            "gesetzt",
-            "beträgt",
-        ]:
-            if candidate is None:
-                continue
-            key = str(candidate).strip()
-            if not key:
-                continue
-            low = key.lower()
-            if low in seen_keywords:
-                continue
-            seen_keywords.add(low)
-            keyword_candidates.append(key)
+        keyword_candidates = build_streitwert_keywords(term)
         def extract_from_current_page(reason_label, attempt_label="primary"):
             self._wait_for_pdf_ready(prefix=prefix, reason=reason_label)
             page_img, page_scale = _grab_region_color_generic(
@@ -3706,6 +3994,13 @@ class RDPApp(tk.Tk):
                 self.rechnungen_only_csv_var.get().strip()
                 or "rechnungen_only_results.csv"
             )
+        if hasattr(self, "log_dir_var"):
+            log_dir = (self.log_dir_var.get() or "").strip()
+            self.cfg["log_folder"] = log_dir or LOG_DIR
+        if hasattr(self, "log_extract_csv_var"):
+            log_csv = (self.log_extract_csv_var.get() or "").strip()
+            default_csv = DEFAULTS.get("log_extract_results_csv", "streitwert_log_extract.csv")
+            self.cfg["log_extract_results_csv"] = log_csv or default_csv
         self.cfg["streitwert_overlay_skip_waits"] = bool(
             self.skip_waits_var.get()
         )
@@ -3767,6 +4062,14 @@ class RDPApp(tk.Tk):
                     self.cfg.get(
                         "rechnungen_only_results_csv",
                         "rechnungen_only_results.csv",
+                    )
+                )
+            if hasattr(self, "log_dir_var"):
+                self.log_dir_var.set(self.cfg.get("log_folder", LOG_DIR))
+            if hasattr(self, "log_extract_csv_var"):
+                self.log_extract_csv_var.set(
+                    self.cfg.get(
+                        "log_extract_results_csv", "streitwert_log_extract.csv"
                     )
                 )
             if hasattr(self, "skip_waits_var"):
