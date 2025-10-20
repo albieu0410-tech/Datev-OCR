@@ -57,6 +57,7 @@ DEFAULTS = {
     "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
     "pdf_hits_point": [0.08, 0.32],  # button inside the PDF hits pane
     "pdf_hits_second_point": [0.08, 0.40],  # optional 2nd PDF result button
+    "pdf_hits_third_point": [0.08, 0.48],  # optional 3rd PDF result button
     "pdf_text_region": [0.20, 0.18, 0.74, 0.68],  # main page text area
     "includes": "Urt,SWB,SW",  # rows to include if they contain any of these
     "excludes": "SaM,KLE",  # rows to skip if they contain any of these
@@ -1004,6 +1005,27 @@ class RDPApp(tk.Tk):
             state="readonly",
         ).pack(side=tk.LEFT, padx=4)
 
+        cal2c = ttk.Frame(streit_frame)
+        cal2c.pack(anchor="w", pady=(0, 2))
+        ttk.Button(
+            cal2c,
+            text="Pick 3rd PDF Result Button",
+            command=self.pick_pdf_third_hits_point,
+        ).pack(side=tk.LEFT, padx=2)
+        hits3_pt = self.cfg.get("pdf_hits_third_point")
+        hits3_txt = (
+            f"{hits3_pt[0]:.3f}, {hits3_pt[1]:.3f}"
+            if isinstance(hits3_pt, (list, tuple)) and len(hits3_pt) == 2
+            else ""
+        )
+        self.pdf_hits3_var = tk.StringVar(value=hits3_txt)
+        ttk.Entry(
+            cal2c,
+            textvariable=self.pdf_hits3_var,
+            width=20,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=4)
+
         cal3 = ttk.Frame(streit_frame)
         cal3.pack(anchor="w", pady=(0, 2))
         ttk.Button(
@@ -1555,6 +1577,22 @@ class RDPApp(tk.Tk):
         if hasattr(self, "pdf_hits2_var"):
             self.pdf_hits2_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
         self.log_print(f"Secondary PDF hits button point set: {rel}")
+
+    def pick_pdf_third_hits_point(self):
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        x, y = self._prompt_and_capture_point(
+            "Pick",
+            "Hover the PDF results button for the THIRD match, then confirm.",
+        )
+        rel = abs_to_rel(self.current_rect, abs_point=(x, y))
+        self.cfg["pdf_hits_third_point"] = rel
+        if hasattr(self, "pdf_hits3_var"):
+            self.pdf_hits3_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
+        self.log_print(f"Tertiary PDF hits button point set: {rel}")
 
     def pick_pdf_text_region(self):
         rb = self._two_click_box(
@@ -2635,8 +2673,12 @@ class RDPApp(tk.Tk):
     def _click_pdf_result_button(self, prefix="", which="primary"):
         if not self.current_rect:
             return False
-        key = "pdf_hits_point" if which != "secondary" else "pdf_hits_second_point"
-        label = "PDF result button" if which != "secondary" else "secondary PDF result button"
+        mapping = {
+            "primary": ("pdf_hits_point", "PDF result button"),
+            "secondary": ("pdf_hits_second_point", "secondary PDF result button"),
+            "tertiary": ("pdf_hits_third_point", "tertiary PDF result button"),
+        }
+        key, label = mapping.get(which, mapping["primary"])
         point = self.cfg.get(key)
         if not (isinstance(point, (list, tuple)) and len(point) == 2):
             msg = f"{label.capitalize()} is not configured. Please calibrate it."
@@ -2768,10 +2810,14 @@ class RDPApp(tk.Tk):
             "Streitwert wurde",
             "Streitwert wird",
             "Streitwert beträgt",
+            "Streitwert bis",
+            "Streitwert bis Euro",
+            "Streitwert bis EUR",
             "festgesetzt",
             "festgesetzt auf",
             "bis zu",
             "biszu",
+            "bis euro",
             "gesetzt",
             "beträgt",
         ]:
@@ -2835,6 +2881,27 @@ class RDPApp(tk.Tk):
             else:
                 self.log_print(
                     f"{prefix}Secondary PDF result button not available; skipping fallback."
+                )
+
+        third_point = self.cfg.get("pdf_hits_third_point")
+        if isinstance(third_point, (list, tuple)) and len(third_point) == 2:
+            self.log_print(
+                f"{prefix}No Streitwert from earlier attempts. Trying third PDF result."
+            )
+            if self._click_pdf_result_button(prefix=prefix, which="tertiary"):
+                if extra_wait > 0:
+                    self.log_print(
+                        f"{prefix}Waiting {extra_wait:.1f}s after third PDF result click."
+                    )
+                    time.sleep(extra_wait)
+                amount = extract_from_current_page(
+                    "after third PDF result click", attempt_label="tertiary"
+                )
+                if amount:
+                    return amount
+            else:
+                self.log_print(
+                    f"{prefix}Tertiary PDF result button not available; skipping fallback."
                 )
 
         return None
@@ -3536,6 +3603,18 @@ class RDPApp(tk.Tk):
                     )
                 else:
                     self.pdf_hits2_var.set("")
+            hits3_pt = self.cfg.get("pdf_hits_third_point")
+            if hasattr(self, "pdf_hits3_var"):
+                if (
+                    isinstance(hits3_pt, (list, tuple))
+                    and len(hits3_pt) == 2
+                    and all(isinstance(v, (int, float)) for v in hits3_pt)
+                ):
+                    self.pdf_hits3_var.set(
+                        f"{hits3_pt[0]:.3f}, {hits3_pt[1]:.3f}"
+                    )
+                else:
+                    self.pdf_hits3_var.set("")
             view_pt = self.cfg.get("doc_view_point")
             if isinstance(view_pt, (list, tuple)) and len(view_pt) == 2:
                 self.doc_view_var.set(f"{view_pt[0]:.3f}, {view_pt[1]:.3f}")
