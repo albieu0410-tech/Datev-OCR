@@ -319,47 +319,82 @@ def clean_amount_display(amount: str) -> str:
 def normalize_amount_candidate(raw_amount: str):
     if not raw_amount:
         return None
+
     text = unicodedata.normalize("NFKC", str(raw_amount))
     currency_match = re.search(r"(EUR|€)", text, re.IGNORECASE)
     currency_suffix = ""
     if currency_match:
         symbol = currency_match.group(1)
         currency_suffix = " EUR" if symbol.upper().startswith("EUR") else " €"
+
     text = re.sub(r"(EUR|€)", "", text, flags=re.IGNORECASE)
     text = text.replace("\u202f", " ").replace("\xa0", " ")
     text = text.replace("−", "-")
     text = text.replace("'", "").replace("`", "").replace("´", "")
     text = text.strip()
     text = re.sub(r",-+$", ",00", text)
-    if "," not in text and re.search(r"\.(\d{2})(?:$|\D)", text):
-        text = re.sub(r"\.(\d{2})(?:$|\D)", r",\1", text)
+
+    negative = False
+    if text.startswith("-"):
+        negative = True
+        text = text[1:]
+
     text = text.replace(" ", "")
     text = re.sub(r"[^0-9,.-]", "", text)
-    sep_idx = max(text.rfind(","), text.rfind("."))
-    if sep_idx != -1:
-        integer_part = text[:sep_idx]
-        decimal_part = text[sep_idx + 1 :]
+    if not text:
+        return None
+
+    has_comma = "," in text
+    has_dot = "." in text
+    decimal_sep = None
+
+    if has_comma and has_dot:
+        decimal_sep = "," if text.rfind(",") > text.rfind(".") else "."
+    elif has_comma:
+        digits_after = len(re.sub(r"[^0-9]", "", text[text.rfind(",") + 1 :]))
+        if 0 < digits_after <= 2:
+            decimal_sep = ","
+    elif has_dot:
+        digits_after = len(re.sub(r"[^0-9]", "", text[text.rfind(".") + 1 :]))
+        if 0 < digits_after <= 2:
+            decimal_sep = "."
+
+    if decimal_sep:
+        sep_idx = text.rfind(decimal_sep)
+        integer_raw = text[:sep_idx]
+        decimal_raw = text[sep_idx + 1 :]
     else:
-        integer_part = text
-        decimal_part = ""
-    integer_part = re.sub(r"[^0-9]", "", integer_part)
-    decimal_part = re.sub(r"[^0-9]", "", decimal_part)
+        integer_raw = text
+        decimal_raw = ""
+
+    integer_part = re.sub(r"[^0-9]", "", integer_raw)
+    decimal_part = re.sub(r"[^0-9]", "", decimal_raw)
+
     if not integer_part:
         integer_part = "0"
+
     if not decimal_part:
         decimal_part = "00"
     elif len(decimal_part) == 1:
         decimal_part = f"{decimal_part}0"
     elif len(decimal_part) > 2:
         decimal_part = decimal_part[:2]
+
     try:
         value = Decimal(f"{int(integer_part)}.{decimal_part}")
     except (InvalidOperation, ValueError):
         return None
+
+    if negative:
+        value = -value
+
     formatted_int = f"{int(integer_part):,}".replace(",", ".")
     formatted = f"{formatted_int},{decimal_part}"
+    if negative:
+        formatted = f"-{formatted}"
     if currency_suffix:
         formatted = f"{formatted}{currency_suffix}"
+
     return clean_amount_display(formatted), value
 
 
@@ -2809,6 +2844,10 @@ class RDPApp(tk.Tk):
             "Streitgegenstandes",
             "Streitwert wurde",
             "Streitwert wird",
+            "Streitwert wird auf",
+            "Streitwert wird auf bis zu",
+            "Der Streitwert wird auf",
+            "Der Streitwert wird auf bis zu",
             "Streitwert beträgt",
             "Streitwert bis",
             "Streitwert bis Euro",
