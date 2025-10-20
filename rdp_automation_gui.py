@@ -363,7 +363,10 @@ def find_amount_candidates(text: str):
     candidates = []
     for variant in _amount_search_variants(normalized):
         for match in AMOUNT_CANDIDATE_RE.finditer(variant):
-            parsed = normalize_amount_candidate(match.group(0))
+            raw = match.group(0)
+            if not re.search(r"(EUR|€)", raw, re.IGNORECASE) and "," not in raw and "." not in raw:
+                continue
+            parsed = normalize_amount_candidate(raw)
             if not parsed:
                 continue
             display, value = parsed
