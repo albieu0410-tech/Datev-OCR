@@ -77,6 +77,8 @@ DEFAULTS = {
 }
 CFG_FILE = "rdp_automation_config.json"
 
+STREITWERT_MIN_AMOUNT = Decimal("1000")
+
 
 # ------------------ Helpers ------------------
 def load_cfg():
@@ -269,10 +271,27 @@ DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
 INVOICE_RE = re.compile(r"\b\d{6,}\b")
 
 
-def extract_amount_from_text(text: str):
+def extract_amount_from_text(text: str, min_value=None):
     candidates = find_amount_candidates(text)
     if not candidates:
         return None
+
+    min_decimal = None
+    if min_value is not None:
+        try:
+            min_decimal = Decimal(str(min_value))
+        except Exception:
+            min_decimal = None
+
+    if min_decimal is not None:
+        candidates = [
+            c
+            for c in candidates
+            if c.get("value") is not None and c["value"] >= min_decimal
+        ]
+        if not candidates:
+            return None
+
     best = max(candidates, key=lambda c: c["value"])
     return best["display"] if best else None
 
@@ -476,7 +495,7 @@ def normalize_line_soft(text: str) -> str:
     joined = re.sub(r"\beur\b", "EUR", joined, flags=re.IGNORECASE)
     joined = re.sub(r"(\d+)\.(\d{2})\b", r"\1,\2", joined)
     return joined
-def extract_amount_from_lines(lines, keyword=None):
+def extract_amount_from_lines(lines, keyword=None, min_value=None):
     if not lines:
         return None, None
 
@@ -542,6 +561,11 @@ def extract_amount_from_lines(lines, keyword=None):
                 seen.add(key)
                 yield combined_norm, cand
 
+    try:
+        min_decimal = Decimal(str(min_value)) if min_value is not None else None
+    except Exception:
+        min_decimal = None
+
     def pick_best(indices, required_keywords=None):
         best = None
         best_line = None
@@ -597,6 +621,8 @@ def extract_amount_from_lines(lines, keyword=None):
                 value = candidate.get("value")
                 if value is None:
                     continue
+                if min_decimal is not None and value < min_decimal:
+                    continue
                 distance_score = 0
                 after_keyword = 0
                 if required_terms:
@@ -629,6 +655,8 @@ def extract_amount_from_lines(lines, keyword=None):
                     best_value = value
                     best_score = score_tuple
         if best:
+            if min_decimal is not None and (best_value is None or best_value < min_decimal):
+                return None, None, None
             return best.get("display"), best_line, best_value
         return None, None, None
 
@@ -693,7 +721,7 @@ def extract_amount_from_lines(lines, keyword=None):
         return g_amt, g_line
 
     combined_text = "\n".join(info["norm"] for info in processed if info["norm"]) or ""
-    fallback = extract_amount_from_text(combined_text)
+    fallback = extract_amount_from_text(combined_text, min_value=min_decimal)
     if fallback:
         return fallback, combined_text
 
@@ -2688,12 +2716,18 @@ class RDPApp(tk.Tk):
             term,
             "Streitwert",
             "Streitwertes",
+            "Streitwerts",
             "Streitgegenstand",
             "Streitgegenstandes",
+            "Streitwert wurde",
+            "Streitwert wird",
+            "Streitwert beträgt",
             "festgesetzt",
             "festgesetzt auf",
             "bis zu",
             "biszu",
+            "gesetzt",
+            "beträgt",
         ]:
             if candidate is None:
                 continue
@@ -2720,7 +2754,9 @@ class RDPApp(tk.Tk):
                 f"{prefix}Page OCR lines captured ({attempt_label}): {len(lines_pg)}. Extracting amount."
             )
             amount_raw, amount_line = extract_amount_from_lines(
-                lines_pg, keyword=keyword_candidates or None
+                lines_pg,
+                keyword=keyword_candidates or None,
+                min_value=STREITWERT_MIN_AMOUNT,
             )
             amount_clean = clean_amount_display(amount_raw) if amount_raw else None
             if amount_clean and prefix:
