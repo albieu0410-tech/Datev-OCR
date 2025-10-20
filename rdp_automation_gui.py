@@ -587,19 +587,33 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
             if cached is not None:
                 return cached
             compact = re.sub(r"\s+", "", line_norm)
+            alnum = re.sub(r"[^0-9a-z€]+", "", line_norm)
             norm_positions = []
             compact_positions = []
+            alnum_positions = []
             for term in required_terms:
                 if not term:
                     continue
                 idx_norm = line_norm.find(term)
                 if idx_norm != -1:
                     norm_positions.append(idx_norm)
-                compact_term = term.replace(" ", "")
-                idx_compact = compact.find(compact_term)
-                if idx_compact != -1:
-                    compact_positions.append(idx_compact)
-            info = (compact, norm_positions, compact_positions)
+                compact_term = re.sub(r"\s+", "", term)
+                if compact_term:
+                    idx_compact = compact.find(compact_term)
+                    if idx_compact != -1:
+                        compact_positions.append(idx_compact)
+                alnum_term = re.sub(r"[^0-9a-z€]+", "", term)
+                if alnum_term:
+                    idx_alnum = alnum.find(alnum_term)
+                    if idx_alnum != -1:
+                        alnum_positions.append(idx_alnum)
+            info = {
+                "compact": compact,
+                "alnum": alnum,
+                "norm_positions": norm_positions,
+                "compact_positions": compact_positions,
+                "alnum_positions": alnum_positions,
+            }
             keyword_cache[line_norm] = info
             return info
 
@@ -607,16 +621,22 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
             for line_text, candidate in candidate_variants(idx) or []:
                 line_norm = (line_text or "").lower()
                 if required_terms:
-                    compact_line, norm_positions, compact_positions = keyword_info(
-                        line_norm
+                    info_kw = keyword_info(line_norm)
+                    compact_line = info_kw["compact"]
+                    alnum_line = info_kw["alnum"]
+                    norm_positions = info_kw["norm_positions"]
+                    compact_positions = info_kw["compact_positions"]
+                    alnum_positions = info_kw["alnum_positions"]
+                    has_keyword = bool(
+                        norm_positions or compact_positions or alnum_positions
                     )
-                    has_keyword = bool(norm_positions or compact_positions)
                     if not has_keyword:
                         continue
                     priority = 1
                 else:
                     compact_line = re.sub(r"\s+", "", line_norm)
-                    norm_positions = compact_positions = []
+                    alnum_line = re.sub(r"[^0-9a-z€]+", "", line_norm)
+                    norm_positions = compact_positions = alnum_positions = []
                     priority = 0
                 value = candidate.get("value")
                 if value is None:
@@ -628,21 +648,47 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
                 if required_terms:
                     cand_norm = normalize_line_soft(candidate.get("display", "")).lower()
                     cand_compact = re.sub(r"\s+", "", cand_norm)
+                    cand_alnum = re.sub(r"[^0-9a-z€]+", "", cand_norm)
                     cand_idx = line_norm.find(cand_norm) if cand_norm else -1
-                    use_compact = False
+                    variant_used = "norm"
                     if cand_idx == -1 and cand_compact:
                         cand_idx = compact_line.find(cand_compact)
-                        use_compact = True
-                    if (norm_positions or compact_positions) and cand_idx != -1:
-                        positions = norm_positions if not use_compact else compact_positions
-                        if not positions:
-                            positions = compact_positions if not use_compact else norm_positions
+                        if cand_idx != -1:
+                            variant_used = "compact"
+                    if cand_idx == -1 and cand_alnum:
+                        cand_idx = alnum_line.find(cand_alnum)
+                        if cand_idx != -1:
+                            variant_used = "alnum"
+                    if (
+                        (norm_positions or compact_positions or alnum_positions)
+                        and cand_idx != -1
+                    ):
+                        if variant_used == "norm":
+                            positions = (
+                                norm_positions
+                                or compact_positions
+                                or alnum_positions
+                            )
+                        elif variant_used == "compact":
+                            positions = (
+                                compact_positions
+                                or norm_positions
+                                or alnum_positions
+                            )
+                        else:
+                            positions = (
+                                alnum_positions
+                                or compact_positions
+                                or norm_positions
+                            )
                         diffs = [cand_idx - pos for pos in positions if cand_idx >= pos]
                         if diffs:
                             after_keyword = 1
                             distance_score = -min(diffs)
                         else:
                             continue
+                    else:
+                        continue
                 score_tuple = (
                     priority + after_keyword,
                     after_keyword,
