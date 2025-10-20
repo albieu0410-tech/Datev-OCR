@@ -21,6 +21,9 @@ except Exception:
     _HAS_CV2 = False
 
 # ------------------ Defaults & Config ------------------
+LOG_DIR = "log"
+
+
 DEFAULTS = {
     "rdp_title_regex": r".* - Remote Desktop Connection",
     "excel_path": "input.xlsx",
@@ -82,6 +85,23 @@ STREITWERT_MIN_AMOUNT = Decimal("1000")
 
 
 # ------------------ Helpers ------------------
+def ensure_log_dir():
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+def sanitize_filename(value: str) -> str:
+    if not value:
+        return "ocr_log"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+    safe = safe.strip("._-")
+    if len(safe) > 120:
+        safe = safe[:120]
+    return safe or "ocr_log"
+
+
 def load_cfg():
     if os.path.exists(CFG_FILE):
         with open(CFG_FILE, "r", encoding="utf-8") as f:
@@ -679,56 +699,54 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
                     continue
                 if min_decimal is not None and value < min_decimal:
                     continue
+                cand_display = candidate.get("display", "")
+                cand_norm = normalize_line_soft(cand_display).lower()
+                cand_compact = re.sub(r"\s+", "", cand_norm)
+                cand_alnum = re.sub(r"[^0-9a-z€]+", "", cand_norm)
+                cand_idx = -1
+                variant_used = "norm"
+                if cand_norm:
+                    cand_idx = line_norm.find(cand_norm)
+                if cand_idx == -1 and cand_compact:
+                    cand_idx = compact_line.find(cand_compact)
+                    if cand_idx != -1:
+                        variant_used = "compact"
+                if cand_idx == -1 and cand_alnum:
+                    cand_idx = alnum_line.find(cand_alnum)
+                    if cand_idx != -1:
+                        variant_used = "alnum"
                 distance_score = 0
                 after_keyword = 0
                 if required_terms:
-                    cand_norm = normalize_line_soft(candidate.get("display", "")).lower()
-                    cand_compact = re.sub(r"\s+", "", cand_norm)
-                    cand_alnum = re.sub(r"[^0-9a-z€]+", "", cand_norm)
-                    cand_idx = line_norm.find(cand_norm) if cand_norm else -1
-                    variant_used = "norm"
-                    if cand_idx == -1 and cand_compact:
-                        cand_idx = compact_line.find(cand_compact)
-                        if cand_idx != -1:
-                            variant_used = "compact"
-                    if cand_idx == -1 and cand_alnum:
-                        cand_idx = alnum_line.find(cand_alnum)
-                        if cand_idx != -1:
-                            variant_used = "alnum"
                     if (
-                        (norm_positions or compact_positions or alnum_positions)
-                        and cand_idx != -1
+                        not (norm_positions or compact_positions or alnum_positions)
+                        or cand_idx == -1
                     ):
-                        if variant_used == "norm":
-                            positions = (
-                                norm_positions
-                                or compact_positions
-                                or alnum_positions
-                            )
-                        elif variant_used == "compact":
-                            positions = (
-                                compact_positions
-                                or norm_positions
-                                or alnum_positions
-                            )
-                        else:
-                            positions = (
-                                alnum_positions
-                                or compact_positions
-                                or norm_positions
-                            )
-                        diffs = [cand_idx - pos for pos in positions if cand_idx >= pos]
-                        if diffs:
-                            after_keyword = 1
-                            distance_score = -min(diffs)
-                        else:
-                            continue
+                        continue
+                    if variant_used == "norm":
+                        positions = (
+                            norm_positions or compact_positions or alnum_positions
+                        )
+                    elif variant_used == "compact":
+                        positions = (
+                            compact_positions or norm_positions or alnum_positions
+                        )
+                    else:
+                        positions = (
+                            alnum_positions or compact_positions or norm_positions
+                        )
+                    diffs = [cand_idx - pos for pos in positions if cand_idx >= pos]
+                    if diffs:
+                        after_keyword = 1
+                        distance_score = -min(diffs)
                     else:
                         continue
+                position_score = -cand_idx if cand_idx >= 0 else float("-inf")
                 score_tuple = (
                     priority + after_keyword,
                     after_keyword,
                     distance_score,
+                    position_score,
                     value,
                 )
                 if best_score is None or score_tuple > best_score:
@@ -827,6 +845,7 @@ class RDPApp(tk.Tk):
         self.live_preview_label = None
         self.live_preview_imgtk = None
         self.live_preview_running = False
+        self._ocr_log_paths = {}
 
         self.create_widgets()
 
@@ -2792,7 +2811,9 @@ class RDPApp(tk.Tk):
         pyautogui.hotkey("ctrl", "f4")
         time.sleep(0.2)
 
-    def _process_open_pdf(self, prefix="", search_term=None, retype=False):
+    def _process_open_pdf(
+        self, prefix="", search_term=None, retype=False, log_label=None
+    ):
         try:
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
         except Exception:
@@ -2846,8 +2867,12 @@ class RDPApp(tk.Tk):
             "Streitwert wird",
             "Streitwert wird auf",
             "Streitwert wird auf bis zu",
+            "Streitwert wird bis",
+            "Streitwert wird bis zu",
             "Der Streitwert wird auf",
             "Der Streitwert wird auf bis zu",
+            "Der Streitwert wird bis",
+            "Der Streitwert wird bis zu",
             "Streitwert beträgt",
             "Streitwert bis",
             "Streitwert bis Euro",
@@ -2881,6 +2906,13 @@ class RDPApp(tk.Tk):
                 page_img, lang=self.lang_var.get().strip() or "deu+eng", psm=6
             )
             lines_pg = lines_from_tsv(dft, scale=page_scale)
+            self._append_ocr_log(
+                log_label,
+                f"pdf_{attempt_label}",
+                lines_pg,
+                prefix=prefix,
+                keywords=keyword_candidates,
+            )
             self.log_print(
                 f"{prefix}Page OCR lines captured ({attempt_label}): {len(lines_pg)}. Extracting amount."
             )
@@ -3015,6 +3047,7 @@ class RDPApp(tk.Tk):
 
             queries = self._gather_aktenzeichen()
             self.clear_simple_log()
+            self._reset_ocr_log_state()
             if not queries:
                 return
 
@@ -3112,6 +3145,12 @@ class RDPApp(tk.Tk):
                 )
 
                 if not ordered:
+                    self._append_ocr_log(
+                        f"{aktenzeichen}_doclist_nomatch",
+                        "doclist",
+                        lines,
+                        prefix=prefix,
+                    )
                     reason = ", ".join(
                         f"{r}: {raw}" for raw, r in debug_rows[:4]
                     )
@@ -3125,6 +3164,13 @@ class RDPApp(tk.Tk):
 
                 first = ordered[0]
                 tag = first.get("token") or "any"
+                log_label = f"{aktenzeichen}_{first.get('raw', '')}" if aktenzeichen else first.get("raw", "")
+                self._append_ocr_log(
+                    log_label,
+                    "doclist",
+                    lines,
+                    prefix=prefix,
+                )
                 preview = ", ".join(
                     f"{m['token'] or 'any'} → {m['raw']}" for m in ordered[:3]
                 )
@@ -3155,7 +3201,10 @@ class RDPApp(tk.Tk):
 
                 if doc_wait > 0:
                     time.sleep(doc_wait)
-                amount = self._process_open_pdf(prefix=prefix)
+                amount = self._process_open_pdf(
+                    prefix=prefix,
+                    log_label=log_label,
+                )
                 results.append(
                     {
                         "aktenzeichen": aktenzeichen,
@@ -3223,6 +3272,7 @@ class RDPApp(tk.Tk):
                 0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
             )
             doc_wait = 0.0 if skip_waits else float(self.docwait_var.get() or 1.2)
+            self._reset_ocr_log_state()
             if not self._type_pdf_search(term, prefix="[Test] "):
                 self.log_print("[Test] Unable to type the Streitwert search term.")
                 return
@@ -3264,6 +3314,12 @@ class RDPApp(tk.Tk):
                 f"[Test] Doc list OCR lines: {len(lines)} | includes: {inc or ['(none)']} | excludes: {exc or ['(none)']}"
             )
             if not ordered:
+                self._append_ocr_log(
+                    "TEST_doclist_nomatch",
+                    "doclist",
+                    lines,
+                    prefix="[Test] ",
+                )
                 preview = debug_rows[:5] or [(raw, "") for *_, raw in lines[:5]]
                 for raw, reason in preview:
                     desc = f"  {reason or 'OCR'} → {raw}"
@@ -3273,6 +3329,13 @@ class RDPApp(tk.Tk):
 
             first = ordered[0]
             tag = first.get("token") or "any"
+            log_label = f"TEST_{first.get('raw', '')}"
+            self._append_ocr_log(
+                log_label,
+                "doclist",
+                lines,
+                prefix="[Test] ",
+            )
             if self._select_doclist_entry(
                 first, doc_rect, focus_first=True, prefix="[Test] "
             ):
@@ -3291,7 +3354,9 @@ class RDPApp(tk.Tk):
             if doc_wait > 0:
                 time.sleep(doc_wait)
             amount = self._process_open_pdf(
-                prefix="[Test] ", search_term=term or "Streitwert"
+                prefix="[Test] ",
+                search_term=term or "Streitwert",
+                log_label=log_label,
             )
             self.log_print(
                 f"[Test] Extracted Streitwert amount: {amount or '(none)'}"
@@ -3436,6 +3501,58 @@ class RDPApp(tk.Tk):
             self.live_preview_label.configure(image=self.live_preview_imgtk)
         if self.live_preview_window:
             self.live_preview_window.after(200, self._refresh_live_preview)
+
+    def _reset_ocr_log_state(self):
+        self._ocr_log_paths = {}
+
+    def _append_ocr_log(self, log_label, section, lines, prefix="", keywords=None):
+        if not log_label or not lines:
+            return
+        ensure_log_dir()
+        if not hasattr(self, "_ocr_log_paths"):
+            self._ocr_log_paths = {}
+        if log_label not in self._ocr_log_paths:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            safe = sanitize_filename(log_label)
+            filename = f"{timestamp}_{safe}.log"
+            path = os.path.join(LOG_DIR, filename)
+            self._ocr_log_paths[log_label] = path
+            info = f"{prefix}OCR log file for '{log_label}' → {path}"
+            self.log_print(info.strip())
+        path = self._ocr_log_paths.get(log_label)
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                fh.write(f"\n[{stamp}] Section: {section}\n")
+                if keywords:
+                    try:
+                        joined = ", ".join(str(k) for k in keywords if str(k).strip())
+                    except Exception:
+                        joined = ""
+                    if joined:
+                        fh.write(f"Keywords: {joined}\n")
+                for idx, entry in enumerate(lines, 1):
+                    if isinstance(entry, (list, tuple)) and len(entry) == 5:
+                        x, y, w, h, text = entry
+                    else:
+                        x = y = w = h = None
+                        text = entry if not isinstance(entry, (list, tuple)) else entry[-1]
+                    raw = text or ""
+                    norm = normalize_line(raw)
+                    soft = normalize_line_soft(raw)
+                    fh.write(
+                        f"{idx:03d}: ({x},{y},{w},{h}) -> {raw}\n"
+                    )
+                    if norm and norm != raw:
+                        fh.write(f"      norm: {norm}\n")
+                    if soft and soft not in {raw, norm}:
+                        fh.write(f"      soft: {soft}\n")
+        except Exception as exc:
+            self.log_print(
+                f"{prefix}Failed to write OCR log for '{log_label}': {exc}"
+            )
 
     def log_print(self, text):
         self.log.insert(tk.END, str(text) + "\n")
