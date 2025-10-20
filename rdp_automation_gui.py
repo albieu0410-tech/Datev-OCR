@@ -83,6 +83,14 @@ CFG_FILE = "rdp_automation_config.json"
 
 STREITWERT_MIN_AMOUNT = Decimal("1000")
 
+FORCED_STREITWERT_EXCLUDES = [
+    ("KAA GS", re.compile(r"\bKAA(?:\s+|-)?GS\b", re.IGNORECASE)),
+    ("KAA", re.compile(r"\bKAA\b", re.IGNORECASE)),
+    ("KFB", re.compile(r"\bKFB\b", re.IGNORECASE)),
+    ("KLE", re.compile(r"\bKLE\b", re.IGNORECASE)),
+    ("GS", re.compile(r"\bGS\b", re.IGNORECASE)),
+]
+
 
 # ------------------ Helpers ------------------
 def ensure_log_dir():
@@ -2098,6 +2106,17 @@ class RDPApp(tk.Tk):
             low_norm = norm.lower()
             soft_raw = normalize_for_token_match(raw)
             soft_norm = normalize_for_token_match(norm)
+            forced_skipped = False
+            for label, pattern in FORCED_STREITWERT_EXCLUDES:
+                try:
+                    if pattern.search(raw):
+                        debug_rows.append((raw, f"forced exclude '{label}'"))
+                        forced_skipped = True
+                        break
+                except Exception:
+                    continue
+            if forced_skipped:
+                continue
             if excl_k and re.match(r"^\s*k", low_raw):
                 debug_rows.append((raw, "excluded prefix 'K'"))
                 continue
@@ -2873,12 +2892,30 @@ class RDPApp(tk.Tk):
             "Der Streitwert wird auf bis zu",
             "Der Streitwert wird bis",
             "Der Streitwert wird bis zu",
+            "Die Streitwertfestsetzung",
+            "Die Streitwertfestsetzung hatte",
+            "Die Streitwertfestsetzung hatte einheitlich",
+            "Die Streitwertfestsetzung hatte einheitlich auf",
+            "Die Streitwertfestsetzung hatte einheitlich auf bis zu",
+            "Streitwertfestsetzung",
+            "Streitwertfestsetzung hatte",
+            "Streitwertfestsetzung hatte einheitlich",
+            "Streitwertfestsetzung hatte einheitlich auf",
+            "Streitwertfestsetzung hatte einheitlich auf bis zu",
             "Streitwert beträgt",
             "Streitwert bis",
             "Streitwert bis Euro",
             "Streitwert bis EUR",
             "wird auf",
+            "wird vorläufig",
+            "wird vorläufig auf",
+            "wird vorlaufig",
+            "wird vorlaufig auf",
             "der wird auf",
+            "der wird vorläufig",
+            "der wird vorläufig auf",
+            "der wird vorlaufig",
+            "der wird vorlaufig auf",
             "wird auf bis",
             "wird auf bis zu",
             "wird bis",
