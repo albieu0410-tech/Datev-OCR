@@ -1,4 +1,4 @@
-import os, io, json, time, threading, re, unicodedata
+﻿import os, io, json, time, threading, re, unicodedata
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import tkinter as tk
@@ -1168,6 +1168,16 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
 
 # ------------------ App Class ------------------
 class RDPApp(tk.Tk):
+    # --- Regex and constants (class-level) ---
+    _KFB_RE = re.compile(r"\bKFB\b", re.IGNORECASE)
+    # European-style numbers like 1.234,56 or 1234,56 or 1 234,56
+    _AMT_NUM_RE = re.compile(r"\b\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})?\b")
+    # Hints that amount-in-words is present on page
+    _WORDS_HINT_RE = re.compile(
+        r"\b(?:euro|eur|tausend|hundert|einhundert|zweihundert|dreihundert|vierhundert|fuenf|fünf|sechs|sieben|acht|neun|zehn|elf|zwoelf|zwölf|zwanzig|dreissig|dreißig|vierzig|fuenfzig|fünfzig|sechzig|siebzig|achtzig|neunzig)\b",
+        re.IGNORECASE,
+    )
+
     # --- Doclist OCR + Click helpers ---
 
     def _ocr_doclist_rows(self):
@@ -1179,7 +1189,13 @@ class RDPApp(tk.Tk):
             self.log_print("[Doclist OCR] doclist_region not configured.")
             return []
 
-        x, y, w, h = self._get("doclist_region")
+        # Convert relative doclist region to absolute screen coords
+        x, y, w, h = rel_to_abs(self.current_rect, self._get("doclist_region"))
+        if w <= 0 or h <= 0:
+            self.log_print(
+                "[Doclist OCR] doclist_region has zero size after conversion."
+            )
+            return []
         img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
         df = do_ocr_data(img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6)
 
@@ -1257,7 +1273,13 @@ class RDPApp(tk.Tk):
             self.log_print("[Doclist OCR] doclist_region not configured.")
             return []
 
-        X, Y, W, H = self._get("doclist_region")
+        # Convert relative doclist region to absolute screen coords
+        X, Y, W, H = rel_to_abs(self.current_rect, self._get("doclist_region"))
+        if W <= 0 or H <= 0:
+            self.log_print(
+                "[Doclist OCR] doclist_region has zero size after conversion."
+            )
+            return []
         img = self._grab_region_color(X, Y, W, H, upscale_x=self.upscale_var.get())
         df = do_ocr_data(img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6)
         if df is None or "text" not in df.columns:
@@ -1346,17 +1368,25 @@ class RDPApp(tk.Tk):
         if not rows or row_idx >= len(rows):
             return False
 
-        # target box in doclist image coords
+        # target box in doclist image coords (relative to the captured doclist image)
         _, (lx, ty, rx, by) = rows[row_idx]
         cx = (lx + rx) // 2
         cy = (ty + by) // 2
 
-        # map to absolute screen coords using calibrated doclist_region
-        X, Y, W, H = self._get("doclist_region")
-        abs_x = X + cx
-        abs_y = Y + cy
+        # Map to absolute screen coords using calibrated doclist_region (relative -> absolute)
+        try:
+            rx, ry, rw, rh = rel_to_abs(self.current_rect, self._get("doclist_region"))
+            abs_x = int(rx + cx)
+            abs_y = int(ry + cy)
+        except Exception:
+            return False
 
         try:
+            # Ensure RDP window focused before clicking
+            try:
+                Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+            except Exception:
+                pass
             pyautogui.click(abs_x, abs_y)
             time.sleep(0.08)
             return True
@@ -1420,13 +1450,13 @@ class RDPApp(tk.Tk):
         w, h = img.width, img.height
         # start scanning below headers (feel free to set 0.50 in config if header is tall)
         rel_top = float(self.cfg.get("instance_row_rel_top", 0.45))
-        y0 = max(0, int(h * rel_top))
-        y1 = h
+        y0 = max(0, min(int(h * rel_top), h - 1))
+        y1 = max(y0 + 1, h)
 
         thirds = [(0, w // 3), (w // 3, 2 * w // 3), (2 * w // 3, w)]
         col_texts = []
         for x0, x1 in thirds:
-            crop = img.crop((x0, y0, x1, y1))
+            crop = self._safe_crop(img, (x0, y0, x1, y1))
             col_texts.append(self._ocr_text_strict(crop))  # <— strict OCR here
 
         return {
@@ -1547,13 +1577,13 @@ class RDPApp(tk.Tk):
         w, h = img.width, img.height
         # start scanning below headers (feel free to set 0.50 in config if header is tall)
         rel_top = float(self.cfg.get("instance_row_rel_top", 0.45))
-        y0 = max(0, int(h * rel_top))
-        y1 = h
+        y0 = max(0, min(int(h * rel_top), h - 1))
+        y1 = max(y0 + 1, h)
 
         thirds = [(0, w // 3), (w // 3, 2 * w // 3), (2 * w // 3, w)]
         col_texts = []
         for x0, x1 in thirds:
-            crop = img.crop((x0, y0, x1, y1))
+            crop = self._safe_crop(img, (x0, y0, x1, y1))
             col_texts.append(self._ocr_text_strict(crop))  # <— strict OCR here
 
         return {
@@ -1584,6 +1614,7 @@ class RDPApp(tk.Tk):
                 from PIL import ImageDraw
 
                 y = data["below_header_y"]
+                y = max(0, min(int(y), img.height - 1))
                 ImageDraw.Draw(img).line([(0, y), (img.width, y)], width=2)
             except Exception:
                 pass
@@ -1646,15 +1677,15 @@ class RDPApp(tk.Tk):
         # Compute row to start scanning (below the header labels)
         rel_top = float(self.cfg.get("instance_row_rel_top", 0.45))
         w, h = img.width, img.height
-        y0 = max(0, int(h * rel_top))
-        y1 = h
+        y0 = max(0, min(int(h * rel_top), h - 1))
+        y1 = max(y0 + 1, h)
 
         # 3 equal columns (I / II / III Instanz)
         thirds = [(0, w // 3), (w // 3, 2 * w // 3), (2 * w // 3, w)]
 
         present = []
         for i, (x0, x1) in enumerate(thirds, start=1):
-            text = self._ocr_text_strict(img.crop((x0, y0, x1, y1)))
+            text = self._ocr_text_strict(self._safe_crop(img, (x0, y0, x1, y1)))
             has_text = self._has_meaningful_content(text)
             present.append(has_text)
             self.log_print(
@@ -1679,7 +1710,7 @@ class RDPApp(tk.Tk):
         # Log the summary
         I, II, III = present
         self.log_print(
-            f"{prefix}Instance detection: I={I}, II={II}, III={III}  "
+            f"{prefix}Instance detection: I={I}, II={II}, III={III} -> "
             f"{('undetermined' if instance_no is None else f'{instance_no}. Instanz')}"
         )
 
@@ -2950,6 +2981,38 @@ class RDPApp(tk.Tk):
             1, int(upscale_x if upscale_x is not None else self.upscale_var.get() or 3)
         )
         return upscale_pil(region, scale=scale)
+
+    def _safe_crop(self, img, box):
+        """
+        Crop with clamping; guarantees at least 1x1 output.
+        """
+        x0, y0, x1, y1 = [int(v) for v in box]
+        # Clamp to image bounds and enforce at least 1px size
+        x0 = max(0, min(x0, img.width - 1))
+        y0 = max(0, min(y0, img.height - 1))
+        x1 = max(x0 + 1, min(int(x1), img.width))
+        y1 = max(y0 + 1, min(int(y1), img.height))
+        return img.crop((x0, y0, x1, y1))
+
+    def _safe_save_png(self, img, path):
+        """
+        Save preview defensively. Skips saving if size is invalid.
+        """
+        try:
+            w, h = img.size
+            if w < 1 or h < 1:
+                self.log_print(f"[Preview] skip save: empty image ({w}x{h}) -> {path}")
+                return
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            tmp = path + ".tmp"
+            img.save(tmp, format="PNG")
+            os.replace(tmp, path)
+        except Exception as e:
+            try:
+                self.log_print(f"[Preview] save failed: {e}")
+            except Exception:
+                pass
 
     def _crop_to_profile(self, img):
         """Crop the passed PIL image (which is the full Result Region) to the active profile's sub-region."""
@@ -4695,10 +4758,22 @@ class RDPApp(tk.Tk):
 
     # ---------- Utilities ----------
     def show_preview(self, img: Image.Image):
-        preview = img.copy()
-        preview.thumbnail((720, 240))
-        self.ocr_preview_imgtk = ImageTk.PhotoImage(preview)
-        self.img_label.configure(image=self.ocr_preview_imgtk)
+        try:
+            w, h = img.size
+            if w < 1 or h < 1:
+                self.log_print(f"[Preview] skip display: empty image ({w}x{h})")
+                return
+            preview = img.copy()
+            if preview.mode not in ("RGB", "RGBA"):
+                preview = preview.convert("RGB")
+            preview.thumbnail((720, 240))
+            self.ocr_preview_imgtk = ImageTk.PhotoImage(preview)
+            self.img_label.configure(image=self.ocr_preview_imgtk)
+        except Exception as e:
+            try:
+                self.log_print(f"[Preview] display failed: {e}")
+            except Exception:
+                pass
 
     # ---------- Live preview (cursor tracking) ----------
     def toggle_live_preview(self):
@@ -5199,17 +5274,19 @@ class RDPApp(tk.Tk):
 
     def _click_file_search_and_type_kfb(self):
         """Click into fees_file_search_region and type the token (once)."""
-        l, t, w, h = self.cfg.get("fees_file_search_region", [0, 0, 0, 0])
-        x = int(
-            self.current_rect[0]
-            + l * self.current_rect[2]
-            + w * self.current_rect[2] / 2
-        )
-        y = int(
-            self.current_rect[1]
-            + t * self.current_rect[3]
-            + h * self.current_rect[3] / 2
-        )
+        try:
+            ax, ay, aw, ah = rel_to_abs(
+                self.current_rect, self.cfg.get("fees_file_search_region", [0, 0, 0, 0])
+            )
+        except Exception:
+            self.log_print("[Fees] File search region not configured.")
+            return
+        x = int(ax + max(1, aw // 2))
+        y = int(ay + max(1, ah // 2))
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
         pyautogui.click(x, y)
         time.sleep(0.1)
         token = (
@@ -5248,12 +5325,13 @@ class RDPApp(tk.Tk):
             if max_clicks is None
             else max_clicks
         )
-        l, t, w, h = self.cfg.get("fees_seiten_region", [0, 0, 0, 0])
-        rx, ry, rw, rh = self.current_rect
-        x0 = int(rx + l * rw)
-        y0 = int(ry + t * rh)
-        W = int(w * rw)
-        H = int(h * rh)
+        try:
+            x0, y0, W, H = rel_to_abs(
+                self.current_rect, self.cfg.get("fees_seiten_region", [0, 0, 0, 0])
+            )
+        except Exception:
+            self.log_print("[Fees] Seiten region not configured.")
+            return
         if W <= 0 or H <= 0:
             self.log_print("[Fees] Seiten region not configured.")
             return
@@ -5278,7 +5356,10 @@ class RDPApp(tk.Tk):
             return False
 
         try:
-            x, y, w, h = self._get("pdf_text_region")
+            # Convert relative pdf_text_region to absolute coords
+            x, y, w, h = rel_to_abs(self.current_rect, self._get("pdf_text_region"))
+            if w <= 0 or h <= 0:
+                return False
             img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
             df = do_ocr_data(
                 img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6
@@ -5296,7 +5377,10 @@ class RDPApp(tk.Tk):
         if not self._has("pdf_text_region"):
             self.log_print("[Fees] pdf_text_region not set; calibrate in Streitwert.")
             return None
-        x, y, w, h = self._get("pdf_text_region")
+        # Convert relative pdf_text_region to absolute coords
+        x, y, w, h = rel_to_abs(self.current_rect, self._get("pdf_text_region"))
+        if w <= 0 or h <= 0:
+            return None
         img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
         df = do_ocr_data(img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6)
         try:
@@ -5331,7 +5415,7 @@ class RDPApp(tk.Tk):
                 break
 
         # 3) Close PDF (reuse Streitwert close)
-        self._close_pdf_if_open()
+        self._close_active_pdf(prefix=prefix)
         self._fees_overlay_wait("doclist")
         return amount
 
