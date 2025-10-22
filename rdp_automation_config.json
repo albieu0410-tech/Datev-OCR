@@ -1,16 +1,33 @@
 {
+  "fees_search_token": "KFB",
+  "fees_bad_prefixes": "SVRAGS;SVR-AGS;Skrags;SV RAGS",
+  "fees_overlay_skip_waits": true,
+  "fees_file_search_region": [
+    0.1,
+    0.08,
+    0.25,
+    0.05
+  ],
+  "fees_seiten_region": [
+    0.08,
+    0.84,
+    0.84,
+    0.12
+  ],
+  "fees_pages_max_clicks": 12,
+  "fees_csv_path": "fees_results.csv",
   "rdp_title_regex": ".* - Remote Desktop Connection",
-  "excel_path": "C:/Users/salbahaca/Downloads/S_Cases_VGL AG zur Bearbeitung.xlsx",
-  "excel_sheet": "Tabelle1",
+  "excel_path": "C:/Users/salbahaca/Documents/Automations/Sorting Excel Dates/Datev OCR/Empty Streitwerts.xlsx",
+  "excel_sheet": "Sheet4",
   "input_column": "aktenzeichen",
   "results_csv": "rdp_results.csv",
   "tesseract_path": "C:/Users/salbahaca/AppData/Local/Programs/Tesseract-OCR/tesseract.exe",
   "tesseract_lang": "deu+eng",
   "type_delay": 0.02,
-  "post_search_wait": 5.5,
+  "post_search_wait": 3.5,
   "search_point": [
-    0.2972689075630252,
-    0.17926356589147288
+    0.19222689075630253,
+    0.1753875968992248
   ],
   "result_region": [
     0.7783613445378151,
@@ -18,7 +35,7 @@
     0.2027310924369748,
     0.03488372093023256
   ],
-  "start_cell": "B364",
+  "start_cell": "A4",
   "max_rows": 0,
   "line_band_px": 40,
   "picked_line_rel_y": null,
@@ -43,5 +60,74 @@
     }
   ],
   "active_amount_profile": "Rechnungen",
-  "use_amount_profile": false
+  "use_amount_profile": false,
+  "doclist_region": [
+    0.11817226890756302,
+    0.626937984496124,
+    0.8692226890756303,
+    0.311046511627907
+  ],
+  "pdf_search_point": [
+    0.5850840336134454,
+    0.6841085271317829
+  ],
+  "pdf_hits_point": [
+    0.026260504201680673,
+    0.14437984496124032
+  ],
+  "pdf_hits_second_point": [
+    0.025735294117647058,
+    0.21996124031007752
+  ],
+  "pdf_hits_third_point": [
+    0.026260504201680673,
+    0.3062015503875969
+  ],
+  "pdf_text_region": [
+    0.34086134453781514,
+    0.04941860465116279,
+    0.3707983193277311,
+    0.8187984496124031
+  ],
+  "includes": "Urt,SWB,SW,SWBs,Prot",
+  "excludes": "SaM,KLE,Anlage,SaGS,SvM,KLE,KAA,GS,Anhang,BGH, KAA GS, KFB, KAAGS",
+  "exclude_prefix_k": true,
+  "streitwert_term": "Streitwert",
+  "streitwert_results_csv": "streitwert_results2.csv",
+  "doc_open_wait": 3.0,
+  "pdf_hit_wait": 2.0,
+  "pdf_view_extra_wait": 0.0,
+  "doc_view_point": [
+    0.2804621848739496,
+    0.686046511627907
+  ],
+  "pdf_close_point": [
+    0.9910714285714286,
+    -0.029069767441860465
+  ],
+  "streitwert_overlay_skip_waits": true,
+  "ignore_top_doc_row": false,
+  "rechnungen_region": [
+    0.8130230125523012,
+    0.2274659863945578,
+    0.17468619246861924,
+    0.070578231292517
+  ],
+  "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
+  "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+  "log_folder": "log",
+  "log_extract_results_csv": "streitwert_log_extract.csv",
+  "instance_region": [
+    0.5603991596638656,
+    0.23837209302325582,
+    0.13602941176470587,
+    0.016472868217054265
+  ],
+  "instance_row_rel_top": 0.45,
+  "pdf_hits_region": [
+    0.008928571428571428,
+    0.12693798449612403,
+    0.03413865546218487,
+    0.035852713178294575
+  ]
 }
