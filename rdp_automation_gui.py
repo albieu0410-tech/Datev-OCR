@@ -1173,6 +1173,10 @@ class RDPApp(tk.Tk):
         r"(?<![0-9A-Za-z])k\s*[-./]?\s*f\s*[-./]?\s*b",
         re.IGNORECASE,
     )
+    _KFB_WORD_RE = re.compile(
+        r"kosten\s*festsetzungs\s*beschl(?:uss|uß|\.)?",
+        re.IGNORECASE,
+    )
     # European-style numbers like 1.234,56 or 1234,56 or 1 234,56
     _AMT_NUM_RE = re.compile(r"\b\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})?\b")
     # Hints that amount-in-words is present on page
@@ -1927,6 +1931,12 @@ class RDPApp(tk.Tk):
             text="Test Fee Extraction",
             command=self.test_fees,
         ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(
+            fees_frame,
+            text="Test Seiten Clicks",
+            command=self.test_fees_seiten_clicks,
+        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Button(
             fees_frame,
@@ -5341,7 +5351,7 @@ class RDPApp(tk.Tk):
         else:
             time.sleep(0.6)  # tiny safety fallback
 
-    def _fees_iter_click_pages(self, max_clicks=None):
+    def _fees_iter_click_pages(self, max_clicks=None, return_positions=False):
         """Click across the Seiten thumbnails from left to right."""
         max_clicks = (
             int(self.cfg.get("fees_pages_max_clicks", 12))
@@ -5367,7 +5377,10 @@ class RDPApp(tk.Tk):
             pyautogui.click(x, y)
             time.sleep(0.15)
             self._fees_overlay_wait("pdf")
-            yield i + 1
+            if return_positions:
+                yield (i + 1, x, y)
+            else:
+                yield i + 1
 
     def _is_pdf_open(self):
         """
@@ -5426,7 +5439,8 @@ class RDPApp(tk.Tk):
         if not self._click_doclist_row(row_idx):  # use your existing helper
             self.log_print(f"{prefix}Cannot click row {row_idx}.")
             return None
-        self._click_view_button()  # your Streitwert view button logic
+        if not self._click_view_button(prefix=prefix):
+            return None
         self._fees_overlay_wait("pdf")
 
         # 2) Click through pages to find amount
@@ -5442,19 +5456,31 @@ class RDPApp(tk.Tk):
         self._fees_overlay_wait("doclist")
         return amount
 
+    def _fees_is_kfb_line(self, text: str) -> bool:
+        if not text:
+            return False
+        if self._KFB_RE.search(text):
+            return True
+        norm = normalize_line_soft(text).lower()
+        if not norm:
+            return False
+        if self._KFB_WORD_RE.search(norm):
+            return True
+        compact = re.sub(r"[^a-zß]", "", norm)
+        return compact.startswith("kostenfestsetzungsbeschl")
+
     def _fees_collect_kfb_rows(self):
         """Return list of (row_index, row_text) that look like KFB and not skipped by bad prefixes."""
         rows_with_boxes = self._ocr_doclist_rows_boxes()
         kfb = []
-        for i, (line, box) in enumerate(rows_with_boxes):
+        for i, (line, _) in enumerate(rows_with_boxes):
             s = (line or "").strip()
             if not s:
                 continue
             if self._fees_should_skip(s):
                 continue
-            if self._KFB_RE.search(s):
+            if self._fees_is_kfb_line(s):
                 kfb.append((i, s))
-                self.log_print(f"[Fees] Found KFB at row {i}: {s} (box: {box})")
         return kfb
 
     def edit_fees_bad_prefixes(self):
@@ -5519,6 +5545,7 @@ class RDPApp(tk.Tk):
         if not kfb_rows:
             self.log_print(f"{prefix}No KFB entries found.")
             return
+        self.log_print(f"{prefix}Found {len(kfb_rows)} KFB entr{'y' if len(kfb_rows)==1 else 'ies'}.")
 
         # Open first N, extract
         N = min(inst, len(kfb_rows))
@@ -5527,9 +5554,10 @@ class RDPApp(tk.Tk):
             row_idx, line = kfb_rows[j]
             self.log_print(f"{prefix}Opening KFB {j+1}/{N}: row {row_idx} → {line}")
             amt = self._fees_open_and_extract_one(row_idx, prefix=prefix)
-            self.log_print(
-                f"{prefix}Amount{' (found)' if amt else ' (not found)'}: {amt}"
-            )
+            if amt:
+                self.log_print(f"{prefix}Amount: {amt}")
+            else:
+                self.log_print(f"{prefix}Amount not found.")
             amounts[j] = amt
 
         # Build CSV row
@@ -5585,9 +5613,25 @@ class RDPApp(tk.Tk):
             self._fees_overlay_wait("doclist")
             kfb_rows = self._fees_collect_kfb_rows()
             if kfb_rows:
+                self.log_print(
+                    f"{prefix}Found {len(kfb_rows)} KFB entr{'y' if len(kfb_rows)==1 else 'ies'} for test."
+                )
                 amount = self._fees_open_and_extract_one(kfb_rows[0][0], prefix=prefix)
 
         self.log_print(f"{prefix}Amount on some page: {amount or '(none found)'}")
+
+    def test_fees_seiten_clicks(self):
+        prefix = "[Fees Seiten Test] "
+        iterator = self._fees_iter_click_pages(max_clicks=6, return_positions=True)
+        if iterator is None:
+            self.log_print(f"{prefix}Seiten region not configured.")
+            return
+        clicks = 0
+        for idx, x, y in iterator:
+            clicks = idx
+            self.log_print(f"{prefix}Click {idx} at ({x}, {y}).")
+        if clicks == 0:
+            self.log_print(f"{prefix}No clicks executed.")
 
     def save_amount_profile(self):
         name = (self.new_prof_name_var.get() or "").strip()
