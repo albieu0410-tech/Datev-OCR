@@ -2,7 +2,7 @@
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageFilter, ImageOps, ImageStat, ImageDraw
 import pandas as pd
@@ -1169,7 +1169,10 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
 # ------------------ App Class ------------------
 class RDPApp(tk.Tk):
     # --- Regex and constants (class-level) ---
-    _KFB_RE = re.compile(r"\bKFB\b", re.IGNORECASE)
+    _KFB_RE = re.compile(
+        r"(?<![0-9A-Za-z])k\s*[-./]?\s*f\s*[-./]?\s*b",
+        re.IGNORECASE,
+    )
     # European-style numbers like 1.234,56 or 1234,56 or 1 234,56
     _AMT_NUM_RE = re.compile(r"\b\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})?\b")
     # Hints that amount-in-words is present on page
@@ -1877,7 +1880,16 @@ class RDPApp(tk.Tk):
         self.fees_bad_var = tk.StringVar(
             value=self.cfg.get("fees_bad_prefixes", "SVRAGS;SVR-AGS;Skrags;SV RAGS")
         )
-        ttk.Entry(fees_frame, textvariable=self.fees_bad_var, width=40).pack(anchor="w")
+        bad_frame = ttk.Frame(fees_frame)
+        bad_frame.pack(anchor="w")
+        ttk.Entry(bad_frame, textvariable=self.fees_bad_var, width=40).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(
+            bad_frame,
+            text="Edit...",
+            command=self.edit_fees_bad_prefixes,
+        ).pack(side=tk.LEFT, padx=4)
 
         # Maximum page clicks
         mp = ttk.Frame(fees_frame)
@@ -5269,8 +5281,19 @@ class RDPApp(tk.Tk):
         if not bad:
             return False
         toks = [b.strip().lower() for b in bad.split(";") if b.strip()]
-        s = (line or "").strip().lower()
-        return any(s.startswith(tok) for tok in toks)
+        if not toks:
+            return False
+        line_raw = (line or "").strip()
+        line_lower = line_raw.lower()
+        line_norm = normalize_line_soft(line_raw).lower()
+
+        for tok in toks:
+            if not tok:
+                continue
+            tok_norm = normalize_line_soft(tok).lower()
+            if line_lower.startswith(tok) or line_norm.startswith(tok_norm):
+                return True
+        return False
 
     def _click_file_search_and_type_kfb(self):
         """Click into fees_file_search_region and type the token (once)."""
@@ -5433,6 +5456,21 @@ class RDPApp(tk.Tk):
                 kfb.append((i, s))
                 self.log_print(f"[Fees] Found KFB at row {i}: {s} (box: {box})")
         return kfb
+
+    def edit_fees_bad_prefixes(self):
+        """Prompt the user to edit the semicolon-separated bad prefixes list."""
+        try:
+            current = (self.fees_bad_var.get() or "").strip()
+        except Exception:
+            current = ""
+        value = simpledialog.askstring(
+            "Fees Bad Prefixes",
+            "Prefixes to skip (separate with semicolons):",
+            initialvalue=current,
+            parent=self,
+        )
+        if value is not None:
+            self.fees_bad_var.set(value.strip())
 
     def pick_fees_file_search_region(self):
         """Two-click calibration for the KFB search text region."""
