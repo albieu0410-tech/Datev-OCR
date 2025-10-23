@@ -89,6 +89,7 @@ DEFAULTS = {
     "rechnungen_gg_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
     "rechnungen_search_wait": 1.2,
+    "rechnungen_region_wait": 0.8,
     "rechnungen_overlay_skip_waits": False,
     "log_folder": LOG_DIR,
     "log_extract_results_csv": "streitwert_log_extract.csv",
@@ -524,6 +525,9 @@ def normalize_for_token_match(text: str) -> str:
 
 
 GG_LABEL_TRANSLATE = str.maketrans({"6": "G", "0": "G", "O": "G", "Q": "G", "C": "G", "€": "G"})
+GG_EXTENDED_SUFFIX_RE = re.compile(
+    r"^(?:GEMAESS|GEMAE?S|GEM|GEMAES)[A-Z0-9]*URT[A-Z0-9]*$"
+)
 
 
 def normalize_gg_candidate(text: str) -> str:
@@ -533,6 +537,21 @@ def normalize_gg_candidate(text: str) -> str:
     normalized = normalized.replace(":", " ")
     normalized = re.sub(r"[^A-Z0-9]", "", normalized.upper())
     return normalized.translate(GG_LABEL_TRANSLATE)
+
+
+def is_gg_label(text: str) -> bool:
+    normalized = normalize_gg_candidate(text)
+    if not normalized:
+        return False
+    if normalized == "GG":
+        return True
+    if normalized.startswith("GG"):
+        remainder = normalized[2:]
+        if not remainder:
+            return True
+        if GG_EXTENDED_SUFFIX_RE.match(remainder):
+            return True
+    return False
 
 
 AMOUNT_RE = re.compile(
@@ -2434,6 +2453,16 @@ class RDPApp(tk.Tk):
             search_row, textvariable=self.rechnungen_search_wait_var, width=6
         ).pack(side=tk.LEFT, padx=6)
 
+        region_row = ttk.Frame(timing_box)
+        region_row.pack(anchor="w", pady=(0, 2))
+        ttk.Label(region_row, text="Region wait (sec)").pack(side=tk.LEFT)
+        self.rechnungen_region_wait_var = tk.StringVar(
+            value=str(self.cfg.get("rechnungen_region_wait", 0.8))
+        )
+        ttk.Entry(
+            region_row, textvariable=self.rechnungen_region_wait_var, width=6
+        ).pack(side=tk.LEFT, padx=6)
+
         self.rechnungen_skip_waits_var = tk.BooleanVar(
             value=self.cfg.get("rechnungen_overlay_skip_waits", False)
         )
@@ -3964,6 +3993,25 @@ class RDPApp(tk.Tk):
 
         return unique or [base_auto]
 
+    def _get_rechnungen_region_wait(self):
+        wait_setting = self.cfg.get(
+            "rechnungen_region_wait",
+            DEFAULTS.get("rechnungen_region_wait", 0.0),
+        )
+        try:
+            wait_seconds = float(wait_setting)
+        except Exception:
+            wait_seconds = float(DEFAULTS.get("rechnungen_region_wait", 0.0))
+        return max(0.0, wait_seconds)
+
+    def _wait_for_rechnungen_region(self, cfg_key, prefix="", label=""):
+        wait_seconds = self._get_rechnungen_region_wait()
+        if wait_seconds <= 0 or self._should_skip_manual_waits():
+            return
+        name = label or cfg_key.replace("_", " ").title()
+        self.log_print(f"{prefix}Waiting {wait_seconds:.2f}s for {name} region.")
+        time.sleep(wait_seconds)
+
     def _capture_named_region_preview_and_lines(self, cfg_key, prefix="", label=""):
         if not self.current_rect:
             self.log_print(
@@ -3975,6 +4023,8 @@ class RDPApp(tk.Tk):
             self.log_print(f"{prefix}{name} region is not configured.")
             return None, [], 1
         try:
+            if cfg_key in {"rechnungen_region", "rechnungen_gg_region"}:
+                self._wait_for_rechnungen_region(cfg_key, prefix=prefix, label=label)
             x, y, w, h = rel_to_abs(self.current_rect, self._get(cfg_key))
             scale = max(1, int(self.upscale_var.get() or 3))
             img = self._grab_region_color(x, y, w, h, upscale_x=scale)
@@ -4338,6 +4388,8 @@ class RDPApp(tk.Tk):
             invoice_match = INVOICE_RE.search(norm)
             invoice = invoice_match.group(0) if invoice_match else ""
             label_info = self._extract_rechnungen_label_info(row, norm)
+            label_display = label_info.get("display", "")
+            label_normalized = label_info.get("normalized", "")
             entry = {
                 "raw": raw,
                 "norm": norm,
@@ -4348,8 +4400,11 @@ class RDPApp(tk.Tk):
                 "date": date_text,
                 "date_obj": date_obj,
                 "invoice": invoice,
-                "label": label_info.get("display", ""),
-                "label_normalized": label_info.get("normalized", ""),
+                "label": label_display,
+                "label_normalized": label_normalized,
+                "label_is_gg": (
+                    is_gg_label(label_normalized) or is_gg_label(label_display)
+                ),
                 "label_box": label_info.get("box"),
                 "x": row.get("x", 0),
                 "y": row.get("y", 0),
@@ -4384,19 +4439,25 @@ class RDPApp(tk.Tk):
     def _is_gg_entry(self, entry):
         if not entry:
             return False
+        if entry.get("label_is_gg"):
+            return True
+
         label_norm = entry.get("label_normalized") or ""
-        if label_norm == "GG":
+        if is_gg_label(label_norm):
             return True
 
         label_display = entry.get("label") or ""
-        if normalize_gg_candidate(label_display) == "GG":
+        if is_gg_label(label_display):
             return True
 
         raw_text = entry.get("raw") or ""
         if raw_text:
             tokens = re.split(r"[^A-Z0-9]+", normalize_line(raw_text).upper())
-            if any(token == "GG" for token in tokens if token):
-                return True
+            for token in tokens:
+                if not token:
+                    continue
+                if is_gg_label(token):
+                    return True
 
         return False
 
@@ -5806,6 +5867,15 @@ class RDPApp(tk.Tk):
                 self.cfg["rechnungen_search_wait"] = DEFAULTS.get(
                     "rechnungen_search_wait", 1.2
                 )
+        if hasattr(self, "rechnungen_region_wait_var"):
+            try:
+                self.cfg["rechnungen_region_wait"] = float(
+                    self.rechnungen_region_wait_var.get() or "0.0"
+                )
+            except Exception:
+                self.cfg["rechnungen_region_wait"] = DEFAULTS.get(
+                    "rechnungen_region_wait", 0.0
+                )
         if hasattr(self, "rechnungen_skip_waits_var"):
             self.cfg["rechnungen_overlay_skip_waits"] = bool(
                 self.rechnungen_skip_waits_var.get()
@@ -5904,6 +5974,12 @@ class RDPApp(tk.Tk):
                     self.cfg.get("post_search_wait", 1.2),
                 )
                 self.rechnungen_search_wait_var.set(str(wait_val))
+            if hasattr(self, "rechnungen_region_wait_var"):
+                region_wait = self.cfg.get(
+                    "rechnungen_region_wait",
+                    DEFAULTS.get("rechnungen_region_wait", 0.0),
+                )
+                self.rechnungen_region_wait_var.set(str(region_wait))
             if hasattr(self, "rechnungen_skip_waits_var"):
                 self.rechnungen_skip_waits_var.set(
                     self.cfg.get("rechnungen_overlay_skip_waits", False)
