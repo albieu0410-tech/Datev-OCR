@@ -5351,6 +5351,124 @@ class RDPApp(tk.Tk):
         else:
             time.sleep(0.6)  # tiny safety fallback
 
+    def _fees_analyze_seiten_region(
+        self, x0, y0, W, H, max_clicks=None, img=None, lang=None
+    ):
+        """
+        Inspect the configured Seiten strip and return:
+          - preview image (for reuse by caller)
+          - compact OCR summary text (bottom digits strip)
+          - detected page-label sequence (e.g. "1 2 3 4")
+          - click positions derived from the page labels
+        """
+
+        result = {
+            "img": None,
+            "token_summary": "",
+            "digit_summary": "",
+            "positions": [],
+        }
+
+        if W <= 0 or H <= 0:
+            return result
+
+        if lang is None:
+            try:
+                lang = self.lang_var.get().strip() or "deu+eng"
+            except Exception:
+                lang = "deu+eng"
+
+        try:
+            preview = img or self._grab_region_color(
+                x0, y0, W, H, upscale_x=self.upscale_var.get()
+            )
+        except Exception:
+            return result
+
+        result["img"] = preview
+
+        if preview.width < 2 or preview.height < 2:
+            return result
+
+        band_top = int(preview.height * 0.55)
+        band = self._safe_crop(preview, (0, band_top, preview.width, preview.height))
+        if band.width < 2 or band.height < 2:
+            return result
+
+        scale = 3
+        proc = band.resize((band.width * scale, band.height * scale), Image.LANCZOS)
+        proc = ImageOps.autocontrast(ImageOps.grayscale(proc))
+
+        try:
+            df = do_ocr_data(proc, lang=lang, psm=6)
+        except Exception:
+            df = None
+
+        if df is None or "text" not in df.columns:
+            return result
+
+        texts = []
+        digits = []
+        for row in df.itertuples():
+            text = str(getattr(row, "text", "")).strip()
+            if not text:
+                continue
+
+            left = getattr(row, "left", 0)
+            top = getattr(row, "top", 0)
+            width = getattr(row, "width", 0)
+            height = getattr(row, "height", 0)
+
+            if pd.isna(left):
+                left = 0
+            if pd.isna(top):
+                top = 0
+            if pd.isna(width) or width <= 0:
+                width = 1
+            if pd.isna(height) or height <= 0:
+                height = 1
+
+            # Project coordinates back to the preview (pre-scale, pre-crop)
+            left = float(left) / scale
+            top = float(top) / scale + band_top
+            width = float(width) / scale
+            height = float(height) / scale
+
+            texts.append(text)
+
+            if re.fullmatch(r"\d+", text):
+                center_x = left + width / 2.0
+                center_y = top + height / 2.0
+                digits.append((text, center_x, center_y, height))
+
+        if texts:
+            summary = " | ".join(texts)
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
+            result["token_summary"] = summary
+
+        if not digits:
+            return result
+
+        digits.sort(key=lambda item: item[1])
+        page_labels = []
+        positions = []
+        limit = max_clicks or len(digits)
+
+        for idx, (label, cx, cy, h) in enumerate(digits):
+            if idx >= limit:
+                break
+            abs_x = int(round(x0 + cx))
+            baseline = y0 + cy
+            target_y = baseline - h * 2.0
+            target_y = max(y0 + 5, min(y0 + H - 5, target_y))
+            positions.append((idx + 1, abs_x, int(round(target_y))))
+            page_labels.append(label)
+
+        result["digit_summary"] = " ".join(page_labels)
+        result["positions"] = positions
+        return result
+
     def _fees_iter_click_pages(self, max_clicks=None, return_positions=False):
         """Click across the Seiten thumbnails from left to right."""
         max_clicks = (
@@ -5369,18 +5487,25 @@ class RDPApp(tk.Tk):
             self.log_print("[Fees] Seiten region not configured.")
             return
 
-        # click N equally spaced thumbs
-        step = max(1, W // max(1, max_clicks))
-        for i in range(max_clicks):
-            x = x0 + step // 2 + i * step
-            y = y0 + H // 2
+        analysis = self._fees_analyze_seiten_region(x0, y0, W, H, max_clicks=max_clicks)
+        positions = analysis.get("positions") or []
+
+        if not positions:
+            # Fallback to evenly spaced clicks if OCR failed to find page labels
+            step = max(1, W // max(1, max_clicks))
+            positions = [
+                (i + 1, x0 + step // 2 + i * step, y0 + H // 2)
+                for i in range(max_clicks)
+            ]
+
+        for idx, x, y in positions:
             pyautogui.click(x, y)
             time.sleep(0.15)
             self._fees_overlay_wait("pdf")
             if return_positions:
-                yield (i + 1, x, y)
+                yield (idx, x, y)
             else:
-                yield i + 1
+                yield idx
 
     def _is_pdf_open(self):
         """
@@ -5650,27 +5775,42 @@ class RDPApp(tk.Tk):
         except Exception:
             self.log_print(f"{prefix}Preview unavailable.")
 
-        if img is not None:
-            try:
-                df = do_ocr_data(
-                    img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6
-                )
-                lines = lines_from_tsv(df)
-                texts = [txt for *_, txt in lines if str(txt).strip()]
-                joined = " | ".join(texts)
-                if len(joined) > 200:
-                    joined = joined[:197] + "..."
-                self.log_print(f"{prefix}OCR text: {joined or '(none)'}")
-            except Exception:
-                self.log_print(f"{prefix}OCR text: (error)")
+        lang = None
+        try:
+            lang = self.lang_var.get().strip() or "deu+eng"
+        except Exception:
+            lang = "deu+eng"
 
-        iterator = self._fees_iter_click_pages(max_clicks=6, return_positions=True)
-        if iterator is None:
-            return
+        analysis = self._fees_analyze_seiten_region(
+            x, y, w, h, max_clicks=6, img=img, lang=lang
+        )
+
+        summary = analysis.get("token_summary") or ""
+        self.log_print(f"{prefix}OCR text: {summary or '(none)'}")
+
+        digits_summary = analysis.get("digit_summary") or ""
+        if digits_summary:
+            self.log_print(f"{prefix}Detected pages: {digits_summary}")
+        else:
+            self.log_print(f"{prefix}Detected pages: (none)")
+
+        positions = analysis.get("positions") or []
         clicks = 0
-        for idx, x, y in iterator:
-            clicks = idx
-            self.log_print(f"{prefix}Click {idx} at ({x}, {y}).")
+        if positions:
+            for idx, cx, cy in positions:
+                clicks = idx
+                pyautogui.click(cx, cy)
+                time.sleep(0.15)
+                self._fees_overlay_wait("pdf")
+                self.log_print(f"{prefix}Click {idx} at ({cx}, {cy}).")
+        else:
+            iterator = self._fees_iter_click_pages(max_clicks=6, return_positions=True)
+            if iterator is None:
+                return
+            for idx, cx, cy in iterator:
+                clicks = idx
+                self.log_print(f"{prefix}Click {idx} at ({cx}, {cy}).")
+
         if clicks == 0:
             self.log_print(f"{prefix}No clicks executed.")
 
