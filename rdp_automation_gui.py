@@ -3849,6 +3849,76 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
+    def _prepare_ocr_variants(self, img, label=""):
+        variants = []
+        if img is None:
+            return variants
+
+        try:
+            gray = img.convert("L")
+        except Exception:
+            try:
+                gray = ImageOps.grayscale(img)
+            except Exception:
+                return [img]
+
+        try:
+            base_auto = ImageOps.autocontrast(gray)
+        except Exception:
+            base_auto = gray
+        variants.append(base_auto)
+
+        normalized_label = (label or "").strip().upper()
+
+        if normalized_label == "GG":
+            try:
+                inverted = ImageOps.autocontrast(ImageOps.invert(gray))
+                variants.append(inverted)
+            except Exception:
+                pass
+
+            try:
+                arr = np.array(gray, dtype=np.uint8)
+                if arr.size:
+                    if _HAS_CV2:
+                        blur = cv2.GaussianBlur(arr, (3, 3), 0)
+                        _, thresh = cv2.threshold(
+                            blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                        )
+                    else:
+                        threshold = np.percentile(arr, 60)
+                        thresh = (arr <= threshold).astype(np.uint8) * 255
+                    thr_img = Image.fromarray(thresh.astype(np.uint8), mode="L")
+                    try:
+                        if ImageStat.Stat(thr_img).mean[0] > 127:
+                            thr_img = ImageOps.invert(thr_img)
+                    except Exception:
+                        pass
+                    try:
+                        thr_img = ImageOps.autocontrast(thr_img)
+                    except Exception:
+                        pass
+                    variants.append(thr_img)
+            except Exception:
+                pass
+
+        unique = []
+        seen = set()
+        for candidate in variants:
+            if candidate is None:
+                continue
+            try:
+                hist = tuple(candidate.histogram())
+                key = (candidate.mode, candidate.size, hist)
+            except Exception:
+                key = (candidate.mode, candidate.size)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+
+        return unique or [base_auto]
+
     def _capture_named_region_preview_and_lines(self, cfg_key, prefix="", label=""):
         if not self.current_rect:
             self.log_print(
@@ -3867,8 +3937,37 @@ class RDPApp(tk.Tk):
             name = label or cfg_key.replace("_", " ").title()
             self.log_print(f"{prefix}Failed to capture {name} region: {exc}")
             return None, [], 1
-        df = do_ocr_data(img, lang=self.lang_var.get().strip() or "deu+eng", psm=6)
-        lines = lines_from_tsv(df, scale=scale)
+        variants = self._prepare_ocr_variants(img, label=label)
+        lines = []
+        seen_lines = set()
+        for variant in variants:
+            try:
+                df = do_ocr_data(
+                    variant, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+                )
+            except Exception:
+                continue
+            variant_lines = lines_from_tsv(df, scale=scale)
+            for entry in variant_lines:
+                if not (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 5
+                ):
+                    continue
+                x, y, w, h, text = entry
+                text_key = " ".join(str(text).split()).lower()
+                key = (
+                    int(round(x / 4)) if x is not None else 0,
+                    int(round(y / 4)) if y is not None else 0,
+                    int(round(w / 4)) if w is not None else 0,
+                    int(round(h / 4)) if h is not None else 0,
+                    text_key,
+                )
+                if key in seen_lines:
+                    continue
+                seen_lines.add(key)
+                lines.append(entry)
+        lines.sort(key=lambda x: (x[1], x[0]))
         name = label or cfg_key.replace("_", " ").title()
         self.log_print(f"{prefix}{name} OCR lines: {len(lines)}.")
         return img, lines, scale
