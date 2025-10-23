@@ -4384,11 +4384,21 @@ class RDPApp(tk.Tk):
     def _is_gg_entry(self, entry):
         if not entry:
             return False
-        label_norm = entry.get("label_normalized")
-        if label_norm and "GG" in label_norm:
+        label_norm = entry.get("label_normalized") or ""
+        if label_norm == "GG":
             return True
-        combined = normalize_gg_candidate(entry.get("norm") or entry.get("raw") or "")
-        return "GG" in combined
+
+        label_display = entry.get("label") or ""
+        if normalize_gg_candidate(label_display) == "GG":
+            return True
+
+        raw_text = entry.get("raw") or ""
+        if raw_text:
+            tokens = re.split(r"[^A-Z0-9]+", normalize_line(raw_text).upper())
+            if any(token == "GG" for token in tokens if token):
+                return True
+
+        return False
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
         img, lines, scale = self._capture_named_region_preview_and_lines(
