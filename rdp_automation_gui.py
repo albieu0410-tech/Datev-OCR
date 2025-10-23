@@ -3849,28 +3849,34 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
-    def _capture_named_region_lines(self, cfg_key, prefix="", label=""):
+    def _capture_named_region_preview_and_lines(self, cfg_key, prefix="", label=""):
         if not self.current_rect:
             self.log_print(
                 f"{prefix}No active RDP rectangle. Connect before capturing."
             )
-            return []
+            return None, [], 1
         if not self._has(cfg_key):
             name = label or cfg_key.replace("_", " ").title()
             self.log_print(f"{prefix}{name} region is not configured.")
-            return []
+            return None, [], 1
         try:
             x, y, w, h = rel_to_abs(self.current_rect, self._get(cfg_key))
-            img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
             scale = max(1, int(self.upscale_var.get() or 3))
+            img = self._grab_region_color(x, y, w, h, upscale_x=scale)
         except Exception as exc:
             name = label or cfg_key.replace("_", " ").title()
             self.log_print(f"{prefix}Failed to capture {name} region: {exc}")
-            return []
+            return None, [], 1
         df = do_ocr_data(img, lang=self.lang_var.get().strip() or "deu+eng", psm=6)
         lines = lines_from_tsv(df, scale=scale)
         name = label or cfg_key.replace("_", " ").title()
         self.log_print(f"{prefix}{name} OCR lines: {len(lines)}.")
+        return img, lines, scale
+
+    def _capture_named_region_lines(self, cfg_key, prefix="", label=""):
+        img, lines, _scale = self._capture_named_region_preview_and_lines(
+            cfg_key, prefix=prefix, label=label
+        )
         return lines
 
     def _capture_rechnungen_lines(self, prefix=""):
@@ -3882,6 +3888,42 @@ class RDPApp(tk.Tk):
         return self._capture_named_region_lines(
             "rechnungen_gg_region", prefix=prefix, label="GG"
         )
+
+    def _annotate_rechnungen_preview(self, img, entries, scale):
+        if img is None:
+            return None
+        if not entries:
+            return img
+        try:
+            preview = img.convert("RGB")
+        except Exception:
+            preview = img
+        draw = ImageDraw.Draw(preview)
+        thickness = max(1, int(scale // 2) or 1)
+        for idx, entry in enumerate(entries, 1):
+            x = int(round(entry.get("x", 0) * scale))
+            y = int(round(entry.get("y", 0) * scale))
+            w = int(round(entry.get("w", 0) * scale))
+            h = int(round(entry.get("h", 0) * scale))
+            x1 = x + max(w, 1)
+            y1 = y + max(h, 1)
+            draw.rectangle([(x, y), (x1, y1)], outline="red", width=thickness)
+            label = f"{idx}: {entry.get('amount', '')}".strip()
+            if label:
+                text_x = x + 2
+                text_y = max(0, y - 14)
+                try:
+                    bbox = draw.textbbox((text_x, text_y), label)
+                except Exception:
+                    approx_w = max(32, 8 * len(label))
+                    approx_h = 14
+                    bbox = (text_x, text_y, text_x + approx_w, text_y + approx_h)
+                draw.rectangle(
+                    [(bbox[0] - 2, bbox[1] - 2), (bbox[2] + 2, bbox[3] + 2)],
+                    fill=(255, 255, 255),
+                )
+                draw.text((text_x, text_y), label, fill="black")
+        return preview
 
     def _parse_rechnungen_entries(self, lines, prefix=""):
         entries = []
@@ -3939,8 +3981,10 @@ class RDPApp(tk.Tk):
         return bool(re.search(r"(?<![A-Z0-9])GG(?![A-Z0-9])", norm_up))
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
-        lines = self._capture_rechnungen_gg_lines(prefix=prefix)
-        if not lines:
+        img, lines, scale = self._capture_named_region_preview_and_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
+        )
+        if img is None and not lines:
             return []
         entries = self._parse_rechnungen_entries(lines, prefix=prefix)
         gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
@@ -3948,6 +3992,17 @@ class RDPApp(tk.Tk):
             self.log_print(f"{prefix}Detected {len(gg_entries)} GG transaction(s).")
         else:
             self.log_print(f"{prefix}No GG transactions detected.")
+        for idx, entry in enumerate(gg_entries, 1):
+            amount = entry.get("amount", "")
+            raw = entry.get("norm") or entry.get("raw") or ""
+            x = entry.get("x", "?")
+            y = entry.get("y", "?")
+            self.log_print(
+                f"{prefix}GG map #{idx}: {amount or '(no amount)'} ← '{raw}' @ ({x}, {y})"
+            )
+        preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
+        if preview is not None:
+            self.show_preview(preview)
         return gg_entries
 
     def _summarize_rechnungen_entries(self, entries):
