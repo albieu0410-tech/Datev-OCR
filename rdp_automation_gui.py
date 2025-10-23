@@ -5622,9 +5622,50 @@ class RDPApp(tk.Tk):
 
     def test_fees_seiten_clicks(self):
         prefix = "[Fees Seiten Test] "
+        try:
+            self.apply_paths_to_tesseract()
+        except Exception:
+            pass
+
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                self.log_print(f"{prefix}No RDP connection.")
+                return
+
+        if not self._has("fees_seiten_region"):
+            self.log_print(f"{prefix}Seiten region not configured.")
+            return
+
+        try:
+            x, y, w, h = rel_to_abs(self.current_rect, self._get("fees_seiten_region"))
+        except Exception:
+            self.log_print(f"{prefix}Seiten region not configured.")
+            return
+
+        img = None
+        try:
+            img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
+            self.show_preview(img)
+        except Exception:
+            self.log_print(f"{prefix}Preview unavailable.")
+
+        if img is not None:
+            try:
+                df = do_ocr_data(
+                    img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6
+                )
+                lines = lines_from_tsv(df)
+                texts = [txt for *_, txt in lines if str(txt).strip()]
+                joined = " | ".join(texts)
+                if len(joined) > 200:
+                    joined = joined[:197] + "..."
+                self.log_print(f"{prefix}OCR text: {joined or '(none)'}")
+            except Exception:
+                self.log_print(f"{prefix}OCR text: (error)")
+
         iterator = self._fees_iter_click_pages(max_clicks=6, return_positions=True)
         if iterator is None:
-            self.log_print(f"{prefix}Seiten region not configured.")
             return
         clicks = 0
         for idx, x, y in iterator:
