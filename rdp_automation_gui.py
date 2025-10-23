@@ -86,6 +86,8 @@ DEFAULTS = {
     "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
     "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+    "rechnungen_gg_region": [0.55, 0.30, 0.35, 0.40],
+    "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
     "log_folder": LOG_DIR,
     "log_extract_results_csv": "streitwert_log_extract.csv",
     # New: AZ Instanz table detection
@@ -2381,9 +2383,41 @@ class RDPApp(tk.Tk):
 
         ttk.Button(
             rechn_frame,
+            text="Pick GG Bezeichnung Region",
+            command=self.pick_rechnungen_gg_region,
+        ).pack(anchor="w", pady=(0, 2))
+
+        gg_box = self.cfg.get("rechnungen_gg_region")
+        if (
+            isinstance(gg_box, (list, tuple))
+            and len(gg_box) == 4
+            and all(isinstance(v, (int, float)) for v in gg_box)
+        ):
+            gg_txt = (
+                f"{gg_box[0]:.3f}, {gg_box[1]:.3f}, "
+                f"{gg_box[2]:.3f}, {gg_box[3]:.3f}"
+            )
+        else:
+            gg_txt = ""
+        self.rechnungen_gg_region_var = tk.StringVar(value=gg_txt)
+        ttk.Entry(
+            rechn_frame,
+            textvariable=self.rechnungen_gg_region_var,
+            width=40,
+            state="readonly",
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Button(
+            rechn_frame,
             text="Test Rechnungen Extraction",
             command=self.test_rechnungen_threaded,
         ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(
+            rechn_frame,
+            text="Test GG Extraction",
+            command=self.test_rechnungen_gg_threaded,
+        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Label(rechn_frame, text="Rechnungen-only CSV").pack(anchor="w", pady=(6, 0))
         self.rechnungen_only_csv_var = tk.StringVar(
@@ -2399,6 +2433,22 @@ class RDPApp(tk.Tk):
             rechn_frame,
             text="Run Rechnungen Extraction",
             command=self.run_rechnungen_only_threaded,
+        ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Label(rechn_frame, text="GG Extract CSV").pack(anchor="w", pady=(6, 0))
+        self.rechnungen_gg_csv_var = tk.StringVar(
+            value=self.cfg.get(
+                "rechnungen_gg_results_csv", "rechnungen_gg_results.csv"
+            )
+        )
+        ttk.Entry(
+            rechn_frame, textvariable=self.rechnungen_gg_csv_var, width=40
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Button(
+            rechn_frame,
+            text="Run GG Extraction",
+            command=self.run_rechnungen_gg_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
         # --- Log tab ---
@@ -2731,6 +2781,19 @@ class RDPApp(tk.Tk):
                     f"{rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f}, {rb[3]:.3f}"
                 )
             self.log_print(f"Rechnungen region set: {rb}")
+
+    def pick_rechnungen_gg_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the GG Bezeichnung area, then OK.",
+            "Hover BOTTOM-RIGHT of the GG area, then OK.",
+        )
+        if rb:
+            self.cfg["rechnungen_gg_region"] = rb
+            if hasattr(self, "rechnungen_gg_region_var"):
+                self.rechnungen_gg_region_var.set(
+                    f"{rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f}, {rb[3]:.3f}"
+                )
+            self.log_print(f"GG region set: {rb}")
 
     def pick_fees_file_search_region(self):
         rb = self._two_click_box(
@@ -3185,6 +3248,32 @@ class RDPApp(tk.Tk):
         except Exception as e:
             self.log_print(f"[Rechnungen Test] ERROR: {e!r}")
 
+    def test_rechnungen_gg_threaded(self):
+        t = threading.Thread(target=self.test_rechnungen_gg, daemon=True)
+        t.start()
+
+    def test_rechnungen_gg(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
+            if not entries:
+                self.log_print("[GG Test] No GG transactions detected.")
+                return
+            for idx, entry in enumerate(entries, 1):
+                detail = self._format_rechnungen_detail(entry)
+                amount = entry.get("amount", "") or "(no amount)"
+                self.log_print(f"[GG Test] #{idx}: {amount}{detail}")
+        except Exception as e:
+            self.log_print(f"[GG Test] ERROR: {e!r}")
+
     def run_rechnungen_only_threaded(self):
         t = threading.Thread(target=self.run_rechnungen_only, daemon=True)
         t.start()
@@ -3273,6 +3362,110 @@ class RDPApp(tk.Tk):
 
         except Exception as e:
             self.log_print(f"[Rechnungen] ERROR: {e!r}")
+
+    def run_rechnungen_gg_threaded(self):
+        t = threading.Thread(target=self.run_rechnungen_gg, daemon=True)
+        t.start()
+
+    def run_rechnungen_gg(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            if not self._doclist_abs_rect():
+                self.log_print("Doc list region is not configured. Please re-run calibration.")
+                return
+
+            queries = self._gather_aktenzeichen()
+            if not queries:
+                return
+
+            skip_waits = self._should_skip_manual_waits()
+            list_wait = (
+                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            )
+
+            results = []
+            total = len(queries)
+            for idx, (aktenzeichen, _row) in enumerate(queries, 1):
+                prefix = f"[GG {idx}/{total}] "
+                self.log_print(f"{prefix}Searching doc list for Aktenzeichen: {aktenzeichen}")
+                if not self._type_doclist_query(aktenzeichen, prefix=prefix):
+                    self.log_print(
+                        f"{prefix}Unable to type Aktenzeichen. Skipping entry."
+                    )
+                    continue
+                if list_wait > 0:
+                    time.sleep(list_wait)
+                self.log_print(
+                    f"{prefix}Typed '{aktenzeichen}' into the document search box."
+                )
+                self._wait_for_doc_search_ready(
+                    prefix=prefix, reason="after Aktenzeichen search"
+                )
+                self._wait_for_doclist_ready(
+                    prefix=prefix, reason="after Aktenzeichen search"
+                )
+
+                entries = self._extract_rechnungen_gg_entries(prefix=prefix)
+                if not entries:
+                    self.log_print(f"{prefix}No GG transactions detected.")
+                    results.append(
+                        {
+                            "aktenzeichen": aktenzeichen,
+                            "gg_detected": False,
+                            "gg_count": 0,
+                            "gg_amounts": "",
+                            "gg_dates": "",
+                            "gg_invoices": "",
+                            "gg_raw": "",
+                        }
+                    )
+                    continue
+
+                amounts = [entry.get("amount", "") or "" for entry in entries]
+                dates = [entry.get("date", "") or "" for entry in entries]
+                invoices = [entry.get("invoice", "") or "" for entry in entries]
+                raw_rows = [entry.get("raw", "") or "" for entry in entries]
+
+                for entry_idx, entry in enumerate(entries, 1):
+                    detail = self._format_rechnungen_detail(entry)
+                    amount = entry.get("amount", "") or "(no amount)"
+                    self.log_print(f"{prefix}#{entry_idx}: {amount}{detail}")
+
+                results.append(
+                    {
+                        "aktenzeichen": aktenzeichen,
+                        "gg_detected": True,
+                        "gg_count": len(entries),
+                        "gg_amounts": "; ".join(filter(None, amounts)),
+                        "gg_dates": "; ".join(filter(None, dates)),
+                        "gg_invoices": "; ".join(filter(None, invoices)),
+                        "gg_raw": " || ".join(filter(None, raw_rows)),
+                    }
+                )
+
+            if results:
+                pd.DataFrame(results).to_csv(
+                    self.rechnungen_gg_csv_var.get(),
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+                self.log_print(
+                    "Done. Saved GG extraction results to "
+                    f"{self.rechnungen_gg_csv_var.get()}"
+                )
+            else:
+                self.log_print("No GG transactions were captured from the Excel list.")
+
+        except Exception as e:
+            self.log_print(f"[GG Extraction] ERROR: {e!r}")
 
     def run_log_extraction_threaded(self):
         t = threading.Thread(target=self.run_log_extraction, daemon=True)
@@ -3656,28 +3849,39 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
-    def _capture_rechnungen_lines(self, prefix=""):
+    def _capture_named_region_lines(self, cfg_key, prefix="", label=""):
         if not self.current_rect:
             self.log_print(
                 f"{prefix}No active RDP rectangle. Connect before capturing."
             )
             return []
-        if "rechnungen_region" not in self.cfg:
-            self.log_print(f"{prefix}Rechnungen region is not configured.")
+        if not self._has(cfg_key):
+            name = label or cfg_key.replace("_", " ").title()
+            self.log_print(f"{prefix}{name} region is not configured.")
             return []
         try:
-            # Get absolute coordinates
-            x, y, w, h = rel_to_abs(self.current_rect, self._get("rechnungen_region"))
-            # Use class method for capture
+            x, y, w, h = rel_to_abs(self.current_rect, self._get(cfg_key))
             img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
             scale = max(1, int(self.upscale_var.get() or 3))
         except Exception as exc:
-            self.log_print(f"{prefix}Failed to capture Rechnungen region: {exc}")
+            name = label or cfg_key.replace("_", " ").title()
+            self.log_print(f"{prefix}Failed to capture {name} region: {exc}")
             return []
         df = do_ocr_data(img, lang=self.lang_var.get().strip() or "deu+eng", psm=6)
         lines = lines_from_tsv(df, scale=scale)
-        self.log_print(f"{prefix}Rechnungen OCR lines: {len(lines)}.")
+        name = label or cfg_key.replace("_", " ").title()
+        self.log_print(f"{prefix}{name} OCR lines: {len(lines)}.")
         return lines
+
+    def _capture_rechnungen_lines(self, prefix=""):
+        return self._capture_named_region_lines(
+            "rechnungen_region", prefix=prefix, label="Rechnungen"
+        )
+
+    def _capture_rechnungen_gg_lines(self, prefix=""):
+        return self._capture_named_region_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
+        )
 
     def _parse_rechnungen_entries(self, lines, prefix=""):
         entries = []
@@ -3726,6 +3930,25 @@ class RDPApp(tk.Tk):
         for norm, reason in skipped[:6]:
             self.log_print(f"{prefix}Skipped Rechnungen line '{norm}' ({reason}).")
         return entries
+
+    def _is_gg_entry(self, entry):
+        if not entry:
+            return False
+        norm = entry.get("norm") or entry.get("raw") or ""
+        norm_up = normalize_line(norm or "").upper()
+        return bool(re.search(r"(?<![A-Z0-9])GG(?![A-Z0-9])", norm_up))
+
+    def _extract_rechnungen_gg_entries(self, prefix=""):
+        lines = self._capture_rechnungen_gg_lines(prefix=prefix)
+        if not lines:
+            return []
+        entries = self._parse_rechnungen_entries(lines, prefix=prefix)
+        gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
+        if gg_entries:
+            self.log_print(f"{prefix}Detected {len(gg_entries)} GG transaction(s).")
+        else:
+            self.log_print(f"{prefix}No GG transactions detected.")
+        return gg_entries
 
     def _summarize_rechnungen_entries(self, entries):
         def _copy(entry):
@@ -5083,6 +5306,11 @@ class RDPApp(tk.Tk):
                 self.rechnungen_only_csv_var.get().strip()
                 or "rechnungen_only_results.csv"
             )
+        if hasattr(self, "rechnungen_gg_csv_var"):
+            self.cfg["rechnungen_gg_results_csv"] = (
+                self.rechnungen_gg_csv_var.get().strip()
+                or "rechnungen_gg_results.csv"
+            )
         if hasattr(self, "log_dir_var"):
             log_dir = (self.log_dir_var.get() or "").strip()
             self.cfg["log_folder"] = log_dir or LOG_DIR
@@ -5162,6 +5390,13 @@ class RDPApp(tk.Tk):
                     self.cfg.get(
                         "rechnungen_only_results_csv",
                         "rechnungen_only_results.csv",
+                    )
+                )
+            if hasattr(self, "rechnungen_gg_csv_var"):
+                self.rechnungen_gg_csv_var.set(
+                    self.cfg.get(
+                        "rechnungen_gg_results_csv",
+                        "rechnungen_gg_results.csv",
                     )
                 )
             if hasattr(self, "log_dir_var"):
@@ -5249,6 +5484,18 @@ class RDPApp(tk.Tk):
                     )
                 else:
                     self.rechnungen_region_var.set("")
+            if hasattr(self, "rechnungen_gg_region_var"):
+                gg_box = self.cfg.get("rechnungen_gg_region")
+                if (
+                    isinstance(gg_box, (list, tuple))
+                    and len(gg_box) == 4
+                    and all(isinstance(v, (int, float)) for v in gg_box)
+                ):
+                    self.rechnungen_gg_region_var.set(
+                        f"{gg_box[0]:.3f}, {gg_box[1]:.3f}, {gg_box[2]:.3f}, {gg_box[3]:.3f}"
+                    )
+                else:
+                    self.rechnungen_gg_region_var.set("")
 
             # Profiles UI
             self.profile_names = [
