@@ -523,6 +523,18 @@ def normalize_for_token_match(text: str) -> str:
     return text.translate(TOKEN_MATCH_TRANSLATE)
 
 
+GG_LABEL_TRANSLATE = str.maketrans({"6": "G", "0": "G", "O": "G", "Q": "G", "C": "G", "€": "G"})
+
+
+def normalize_gg_candidate(text: str) -> str:
+    if not text:
+        return ""
+    normalized = normalize_line(text)
+    normalized = normalized.replace(":", " ")
+    normalized = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+    return normalized.translate(GG_LABEL_TRANSLATE)
+
+
 AMOUNT_RE = re.compile(
     r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{2}|,-)?(?:\s*(?:EUR|€))?",
     re.IGNORECASE,
@@ -4037,10 +4049,7 @@ class RDPApp(tk.Tk):
             if isinstance(h, (int, float)) and h and _safe_number(h) > 0
         ]
         heights.sort()
-        if heights:
-            median_h = heights[len(heights) // 2]
-        else:
-            median_h = 12.0
+        median_h = heights[len(heights) // 2] if heights else 12.0
         tolerance = max(4.0, median_h * 0.6)
 
         groups = []
@@ -4080,15 +4089,20 @@ class RDPApp(tk.Tk):
                 target["max_y"] = max(target["max_y"], y_val + max(h_val, 1.0))
                 target["center"] = (target["min_y"] + target["max_y"]) / 2.0
 
-            target["items"].append((x_val, y_val, w_val, h_val, raw_text))
+            target["items"].append(
+                {
+                    "x": x_val,
+                    "y": y_val,
+                    "w": w_val,
+                    "h": h_val,
+                    "text": raw_text,
+                }
+            )
 
         merged = []
         for group in groups:
-            pieces = [
-                txt
-                for *_vals, txt in sorted(group["items"], key=lambda item: item[0])
-                if txt
-            ]
+            items_sorted = sorted(group["items"], key=lambda item: item["x"])
+            pieces = [item["text"] for item in items_sorted if item.get("text")]
             if not pieces:
                 continue
             combined = " ".join(pieces).strip()
@@ -4098,9 +4112,28 @@ class RDPApp(tk.Tk):
             min_y = int(round(group["min_y"]))
             width = int(round(max(1.0, group["max_x"] - group["min_x"])))
             height = int(round(max(1.0, group["max_y"] - group["min_y"])))
-            merged.append((min_x, min_y, width, height, combined))
+            tokens = [
+                {
+                    "x": int(round(item.get("x", 0.0))),
+                    "y": int(round(item.get("y", 0.0))),
+                    "w": int(round(max(item.get("w", 0.0), 1.0))),
+                    "h": int(round(max(item.get("h", 0.0), 1.0))),
+                    "text": item.get("text", ""),
+                }
+                for item in items_sorted
+            ]
+            merged.append(
+                {
+                    "x": min_x,
+                    "y": min_y,
+                    "w": width,
+                    "h": height,
+                    "text": combined,
+                    "tokens": tokens,
+                }
+            )
 
-        merged.sort(key=lambda x: (x[1], x[0]))
+        merged.sort(key=lambda item: (item.get("y", 0), item.get("x", 0)))
         return merged
 
     def _annotate_rechnungen_preview(self, img, entries, scale):
@@ -4115,10 +4148,18 @@ class RDPApp(tk.Tk):
         draw = ImageDraw.Draw(preview)
         thickness = max(1, int(scale // 2) or 1)
         for idx, entry in enumerate(entries, 1):
-            x = int(round(entry.get("x", 0) * scale))
-            y = int(round(entry.get("y", 0) * scale))
-            w = int(round(entry.get("w", 0) * scale))
-            h = int(round(entry.get("h", 0) * scale))
+            if isinstance(entry.get("amount_box"), (list, tuple)) and len(entry["amount_box"]) == 4:
+                base_x, base_y, base_w, base_h = entry["amount_box"]
+            else:
+                base_x = entry.get("x", 0)
+                base_y = entry.get("y", 0)
+                base_w = entry.get("w", 0)
+                base_h = entry.get("h", 0)
+
+            x = int(round(base_x * scale))
+            y = int(round(base_y * scale))
+            w = int(round(max(base_w, 1) * scale))
+            h = int(round(max(base_h, 1) * scale))
             x1 = x + max(w, 1)
             y1 = y + max(h, 1)
             draw.rectangle([(x, y), (x1, y1)], outline="red", width=thickness)
@@ -4139,17 +4180,151 @@ class RDPApp(tk.Tk):
                 draw.text((text_x, text_y), label, fill="black")
         return preview
 
+    def _select_rechnungen_amount_candidate(self, row, norm):
+        tokens = row.get("tokens") or []
+        row_x = row.get("x", 0)
+        row_y = row.get("y", 0)
+        row_w = row.get("w", 0)
+        row_h = row.get("h", 0)
+        candidates = []
+        seen = set()
+
+        for token in tokens:
+            raw = token.get("text", "")
+            if not raw:
+                continue
+            token_x = token.get("x", row_x)
+            key_base = int(round(token_x))
+            for amt in find_amount_candidates(raw):
+                display = clean_amount_display(amt.get("display")) if amt else None
+                if not display:
+                    continue
+                key = (display, key_base)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "display": display,
+                        "value": amt.get("value"),
+                        "x": token_x,
+                        "box": (
+                            int(round(token.get("x", row_x))),
+                            int(round(token.get("y", row_y))),
+                            int(round(max(token.get("w", 0) or 1, 1))),
+                            int(round(max(token.get("h", 0) or 1, 1))),
+                        ),
+                        "source": raw.strip(),
+                    }
+                )
+
+        if not candidates:
+            key_base = int(round(row_x))
+            for amt in find_amount_candidates(norm):
+                display = clean_amount_display(amt.get("display")) if amt else None
+                if not display:
+                    continue
+                key = (display, key_base)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "display": display,
+                        "value": amt.get("value"),
+                        "x": row_x,
+                        "box": (
+                            int(round(row_x)),
+                            int(round(row_y)),
+                            int(round(max(row_w, 1))),
+                            int(round(max(row_h, 1))),
+                        ),
+                        "source": norm.strip(),
+                    }
+                )
+
+        if not candidates:
+            return {}
+
+        zero = Decimal("0")
+
+        def sort_key(candidate):
+            value = candidate.get("value")
+            positive = 0 if value is not None and value > zero else 1
+            x_coord = candidate.get("x", row_x)
+            magnitude = -value if value is not None else Decimal("0")
+            return (positive, x_coord, magnitude)
+
+        candidates.sort(key=sort_key)
+        return candidates[0]
+
+    def _extract_rechnungen_label_info(self, row, norm):
+        tokens = row.get("tokens") or []
+        row_x = row.get("x", 0)
+        row_y = row.get("y", 0)
+        row_w = max(row.get("w", 0), 1)
+        label_tokens = []
+
+        for token in tokens:
+            raw = token.get("text", "")
+            if not raw:
+                continue
+            normalized = normalize_line(raw)
+            cleaned = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+            if not cleaned or not re.search(r"[A-Z]", cleaned):
+                continue
+            label_tokens.append(
+                {
+                    "raw": raw.strip(),
+                    "clean": cleaned,
+                    "x": token.get("x", row_x),
+                    "y": token.get("y", row_y),
+                    "w": int(round(max(token.get("w", 0), 1))),
+                    "h": int(round(max(token.get("h", 0), 1))),
+                }
+            )
+
+        if not label_tokens:
+            return {"display": "", "normalized": normalize_gg_candidate(norm), "box": None}
+
+        label_tokens.sort(key=lambda info: info.get("x", row_x))
+        cutoff = row_x + row_w * 0.55
+        tail = [info for info in label_tokens if info.get("x", row_x) >= cutoff]
+        if not tail:
+            tail = label_tokens[-3:]
+
+        combined_raw = " ".join(info["raw"] for info in tail if info.get("raw"))
+        combined_clean = "".join(info.get("clean", "") for info in tail)
+        normalized = normalize_gg_candidate(combined_raw or combined_clean)
+
+        min_x = min(info.get("x", row_x) for info in tail)
+        min_y = min(info.get("y", row_y) for info in tail)
+        max_x = max(info.get("x", row_x) + max(info.get("w", 1), 1) for info in tail)
+        max_y = max(info.get("y", row_y) + max(info.get("h", 1), 1) for info in tail)
+        box = (
+            int(round(min_x)),
+            int(round(min_y)),
+            int(round(max_x - min_x)),
+            int(round(max_y - min_y)),
+        )
+
+        return {
+            "display": combined_raw.strip() or combined_clean,
+            "normalized": normalized or normalize_gg_candidate(norm),
+            "box": box,
+        }
+
     def _parse_rechnungen_entries(self, lines, prefix=""):
         merged_lines = self._merge_ocr_rows(lines)
         entries = []
         skipped = []
-        for x, y, w, h, text in merged_lines:
-            raw = (text or "").strip()
+        for row in merged_lines:
+            raw = (row.get("text") or "").strip()
             if not raw:
                 continue
             norm = normalize_line(raw)
-            amount = extract_amount_from_text(norm)
-            amount = clean_amount_display(amount) if amount else None
+            amount_info = self._select_rechnungen_amount_candidate(row, norm)
+            amount = amount_info.get("display") if amount_info else None
             date_match = DATE_RE.search(norm) if norm else None
             if not amount or not date_match:
                 if amount or date_match:
@@ -4162,17 +4337,24 @@ class RDPApp(tk.Tk):
                 date_obj = None
             invoice_match = INVOICE_RE.search(norm)
             invoice = invoice_match.group(0) if invoice_match else ""
+            label_info = self._extract_rechnungen_label_info(row, norm)
             entry = {
                 "raw": raw,
                 "norm": norm,
-                "amount": amount,
+                "amount": clean_amount_display(amount) if amount else amount,
+                "amount_box": amount_info.get("box") if amount_info else None,
+                "amount_value": amount_info.get("value") if amount_info else None,
+                "amount_source": amount_info.get("source") if amount_info else "",
                 "date": date_text,
                 "date_obj": date_obj,
                 "invoice": invoice,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
+                "label": label_info.get("display", ""),
+                "label_normalized": label_info.get("normalized", ""),
+                "label_box": label_info.get("box"),
+                "x": row.get("x", 0),
+                "y": row.get("y", 0),
+                "w": row.get("w", 0),
+                "h": row.get("h", 0),
             }
             entries.append(entry)
         entries.sort(
@@ -4182,18 +4364,31 @@ class RDPApp(tk.Tk):
                 e.get("x", 0),
             )
         )
-        for entry in entries:
-            self.log_print(f"{prefix}Rechnungen candidate: {entry['norm']}")
+        for idx, entry in enumerate(entries, 1):
+            detail = self._format_rechnungen_detail(entry)
+            label_display = entry.get("label") or entry.get("label_normalized") or "-"
+            amount_txt = entry.get("amount", "") or "(no amount)"
+            bounds = entry.get("amount_box")
+            bounds_txt = (
+                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                else ""
+            )
+            self.log_print(
+                f"{prefix}Row {idx}: {amount_txt}{detail} | Label: {label_display}{bounds_txt}"
+            )
         for norm, reason in skipped[:6]:
-            self.log_print(f"{prefix}Skipped Rechnungen line '{norm}' ({reason}).")
+            self.log_print(f"{prefix}Skipped Rechnungen row '{norm}' ({reason}).")
         return entries
 
     def _is_gg_entry(self, entry):
         if not entry:
             return False
-        norm = entry.get("norm") or entry.get("raw") or ""
-        norm_up = normalize_line(norm or "").upper()
-        return bool(re.search(r"(?<![A-Z0-9])GG(?![A-Z0-9])", norm_up))
+        label_norm = entry.get("label_normalized")
+        if label_norm and "GG" in label_norm:
+            return True
+        combined = normalize_gg_candidate(entry.get("norm") or entry.get("raw") or "")
+        return "GG" in combined
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
         img, lines, scale = self._capture_named_region_preview_and_lines(
@@ -4208,12 +4403,17 @@ class RDPApp(tk.Tk):
         else:
             self.log_print(f"{prefix}No GG transactions detected.")
         for idx, entry in enumerate(gg_entries, 1):
-            amount = entry.get("amount", "")
-            raw = entry.get("norm") or entry.get("raw") or ""
-            x = entry.get("x", "?")
-            y = entry.get("y", "?")
+            amount = entry.get("amount", "") or "(no amount)"
+            detail = self._format_rechnungen_detail(entry)
+            label_display = entry.get("label") or entry.get("label_normalized") or "GG"
+            bounds = entry.get("amount_box")
+            bounds_txt = (
+                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                else ""
+            )
             self.log_print(
-                f"{prefix}GG map #{idx}: {amount or '(no amount)'} ← '{raw}' @ ({x}, {y})"
+                f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
             )
         preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
         if preview is not None:
