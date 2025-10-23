@@ -88,6 +88,8 @@ DEFAULTS = {
     "rechnungen_only_results_csv": "rechnungen_only_results.csv",
     "rechnungen_gg_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
+    "rechnungen_search_wait": 1.2,
+    "rechnungen_overlay_skip_waits": False,
     "log_folder": LOG_DIR,
     "log_extract_results_csv": "streitwert_log_extract.csv",
     # New: AZ Instanz table detection
@@ -2407,6 +2409,28 @@ class RDPApp(tk.Tk):
             state="readonly",
         ).pack(anchor="w", pady=(0, 6))
 
+        timing_box = ttk.LabelFrame(rechn_frame, text="Timing & Options")
+        timing_box.pack(fill=tk.X, pady=(0, 6))
+
+        search_row = ttk.Frame(timing_box)
+        search_row.pack(anchor="w", pady=(0, 2))
+        ttk.Label(search_row, text="Search wait (sec)").pack(side=tk.LEFT)
+        self.rechnungen_search_wait_var = tk.StringVar(
+            value=str(self.cfg.get("rechnungen_search_wait", 1.2))
+        )
+        ttk.Entry(
+            search_row, textvariable=self.rechnungen_search_wait_var, width=6
+        ).pack(side=tk.LEFT, padx=6)
+
+        self.rechnungen_skip_waits_var = tk.BooleanVar(
+            value=self.cfg.get("rechnungen_overlay_skip_waits", False)
+        )
+        ttk.Checkbutton(
+            timing_box,
+            text="Only wait for loading overlays (ignore manual delays)",
+            variable=self.rechnungen_skip_waits_var,
+        ).pack(anchor="w", pady=(2, 0))
+
         ttk.Button(
             rechn_frame,
             text="Test Rechnungen Extraction",
@@ -3300,9 +3324,14 @@ class RDPApp(tk.Tk):
                 return
 
             skip_waits = self._should_skip_manual_waits()
-            list_wait = (
-                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            wait_setting = self.cfg.get(
+                "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
             )
+            try:
+                wait_seconds = float(wait_setting)
+            except Exception:
+                wait_seconds = float(DEFAULTS.get("rechnungen_search_wait", 1.2))
+            list_wait = 0.0 if skip_waits else max(0.0, wait_seconds)
 
             results = []
             total = len(queries)
@@ -3322,7 +3351,6 @@ class RDPApp(tk.Tk):
                 self.log_print(
                     f"{prefix}Typed '{aktenzeichen}' into the document search box."
                 )
-                inst_info = self.detect_instance(prefix=prefix)
                 inst_info = self.detect_instance(prefix=prefix)
 
                 self._wait_for_doc_search_ready(
@@ -3387,9 +3415,14 @@ class RDPApp(tk.Tk):
                 return
 
             skip_waits = self._should_skip_manual_waits()
-            list_wait = (
-                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            wait_setting = self.cfg.get(
+                "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
             )
+            try:
+                wait_seconds = float(wait_setting)
+            except Exception:
+                wait_seconds = float(DEFAULTS.get("rechnungen_search_wait", 1.2))
+            list_wait = 0.0 if skip_waits else max(0.0, wait_seconds)
 
             results = []
             total = len(queries)
@@ -3988,6 +4021,88 @@ class RDPApp(tk.Tk):
             "rechnungen_gg_region", prefix=prefix, label="GG"
         )
 
+    def _merge_ocr_rows(self, lines):
+        if not lines:
+            return []
+
+        def _safe_number(value, default=0.0):
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        heights = [
+            _safe_number(h, 0.0)
+            for _, _, _, h, _ in lines
+            if isinstance(h, (int, float)) and h and _safe_number(h) > 0
+        ]
+        heights.sort()
+        if heights:
+            median_h = heights[len(heights) // 2]
+        else:
+            median_h = 12.0
+        tolerance = max(4.0, median_h * 0.6)
+
+        groups = []
+        for entry in sorted(lines, key=lambda x: (x[1], x[0])):
+            if not (isinstance(entry, (list, tuple)) and len(entry) == 5):
+                continue
+            x, y, w, h, text = entry
+            raw_text = (text or "").strip()
+            if not raw_text:
+                continue
+            x_val = _safe_number(x)
+            y_val = _safe_number(y)
+            w_val = max(_safe_number(w), 0.0)
+            h_val = max(_safe_number(h, median_h), 0.0) or median_h
+            center = y_val + h_val / 2.0
+
+            target = None
+            for group in groups:
+                if abs(center - group["center"]) <= tolerance:
+                    target = group
+                    break
+
+            if target is None:
+                target = {
+                    "items": [],
+                    "min_x": x_val,
+                    "min_y": y_val,
+                    "max_x": x_val + max(w_val, 1.0),
+                    "max_y": y_val + max(h_val, 1.0),
+                    "center": center,
+                }
+                groups.append(target)
+            else:
+                target["min_x"] = min(target["min_x"], x_val)
+                target["min_y"] = min(target["min_y"], y_val)
+                target["max_x"] = max(target["max_x"], x_val + max(w_val, 1.0))
+                target["max_y"] = max(target["max_y"], y_val + max(h_val, 1.0))
+                target["center"] = (target["min_y"] + target["max_y"]) / 2.0
+
+            target["items"].append((x_val, y_val, w_val, h_val, raw_text))
+
+        merged = []
+        for group in groups:
+            pieces = [
+                txt
+                for *_vals, txt in sorted(group["items"], key=lambda item: item[0])
+                if txt
+            ]
+            if not pieces:
+                continue
+            combined = " ".join(pieces).strip()
+            if not combined:
+                continue
+            min_x = int(round(group["min_x"]))
+            min_y = int(round(group["min_y"]))
+            width = int(round(max(1.0, group["max_x"] - group["min_x"])))
+            height = int(round(max(1.0, group["max_y"] - group["min_y"])))
+            merged.append((min_x, min_y, width, height, combined))
+
+        merged.sort(key=lambda x: (x[1], x[0]))
+        return merged
+
     def _annotate_rechnungen_preview(self, img, entries, scale):
         if img is None:
             return None
@@ -4025,9 +4140,10 @@ class RDPApp(tk.Tk):
         return preview
 
     def _parse_rechnungen_entries(self, lines, prefix=""):
+        merged_lines = self._merge_ocr_rows(lines)
         entries = []
         skipped = []
-        for x, y, w, h, text in lines:
+        for x, y, w, h, text in merged_lines:
             raw = (text or "").strip()
             if not raw:
                 continue
@@ -5372,10 +5488,16 @@ class RDPApp(tk.Tk):
         self.update_idletasks()
 
     def _should_skip_manual_waits(self):
-        try:
-            return bool(self.skip_waits_var.get())
-        except Exception:
-            return False
+        for attr in ("skip_waits_var", "rechnungen_skip_waits_var"):
+            var = getattr(self, attr, None)
+            if var is None:
+                continue
+            try:
+                if bool(var.get()):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def pull_form_into_cfg(self):
         self.cfg["rdp_title_regex"] = self.rdp_var.get().strip()
@@ -5465,6 +5587,19 @@ class RDPApp(tk.Tk):
                 self.rechnungen_gg_csv_var.get().strip()
                 or "rechnungen_gg_results.csv"
             )
+        if hasattr(self, "rechnungen_search_wait_var"):
+            try:
+                self.cfg["rechnungen_search_wait"] = float(
+                    self.rechnungen_search_wait_var.get() or "1.2"
+                )
+            except Exception:
+                self.cfg["rechnungen_search_wait"] = DEFAULTS.get(
+                    "rechnungen_search_wait", 1.2
+                )
+        if hasattr(self, "rechnungen_skip_waits_var"):
+            self.cfg["rechnungen_overlay_skip_waits"] = bool(
+                self.rechnungen_skip_waits_var.get()
+            )
         if hasattr(self, "log_dir_var"):
             log_dir = (self.log_dir_var.get() or "").strip()
             self.cfg["log_folder"] = log_dir or LOG_DIR
@@ -5552,6 +5687,16 @@ class RDPApp(tk.Tk):
                         "rechnungen_gg_results_csv",
                         "rechnungen_gg_results.csv",
                     )
+                )
+            if hasattr(self, "rechnungen_search_wait_var"):
+                wait_val = self.cfg.get(
+                    "rechnungen_search_wait",
+                    self.cfg.get("post_search_wait", 1.2),
+                )
+                self.rechnungen_search_wait_var.set(str(wait_val))
+            if hasattr(self, "rechnungen_skip_waits_var"):
+                self.rechnungen_skip_waits_var.set(
+                    self.cfg.get("rechnungen_overlay_skip_waits", False)
                 )
             if hasattr(self, "log_dir_var"):
                 self.log_dir_var.set(self.cfg.get("log_folder", LOG_DIR))
