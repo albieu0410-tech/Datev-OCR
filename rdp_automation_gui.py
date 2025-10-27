@@ -3341,14 +3341,20 @@ class RDPApp(tk.Tk):
                     return
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
 
+            self.clear_simple_log()
             entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
             if not entries:
                 self.log_print("[GG Test] No GG transactions detected.")
+                self.simple_log_print("GG Test: no GG transactions detected.")
                 return
+            summary_parts = []
             for idx, entry in enumerate(entries, 1):
                 detail = self._format_rechnungen_detail(entry)
                 amount = entry.get("amount", "") or "(no amount)"
                 self.log_print(f"[GG Test] #{idx}: {amount}{detail}")
+                summary_parts.append(f"{amount}{detail}")
+            if summary_parts:
+                self.simple_log_print(f"GG Test: {'; '.join(summary_parts)}")
         except Exception as e:
             self.log_print(f"[GG Test] ERROR: {e!r}")
 
@@ -3377,6 +3383,8 @@ class RDPApp(tk.Tk):
             if not queries:
                 return
 
+            if queries:
+                self.clear_simple_log()
             skip_waits = self._should_skip_manual_waits()
             wait_setting = self.cfg.get(
                 "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
@@ -3503,6 +3511,7 @@ class RDPApp(tk.Tk):
                 entries = self._extract_rechnungen_gg_entries(prefix=prefix)
                 if not entries:
                     self.log_print(f"{prefix}No GG transactions detected.")
+                    self.simple_log_print(f"{aktenzeichen}: (no GG)")
                     results.append(
                         {
                             "aktenzeichen": aktenzeichen,
@@ -3537,6 +3546,16 @@ class RDPApp(tk.Tk):
                         "gg_raw": " || ".join(filter(None, raw_rows)),
                     }
                 )
+
+                summary_parts = []
+                for entry in entries:
+                    amount = entry.get("amount", "") or "(no amount)"
+                    detail = self._format_rechnungen_detail(entry)
+                    summary_parts.append(f"{amount}{detail}")
+                if summary_parts:
+                    self.simple_log_print(
+                        f"{aktenzeichen}: {'; '.join(summary_parts)}"
+                    )
 
             if results:
                 pd.DataFrame(results).to_csv(
