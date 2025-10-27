@@ -3346,7 +3346,6 @@ class RDPApp(tk.Tk):
 
             self.clear_simple_log()
             entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
-            self._wait_for_preview_ready()
             if not entries:
                 self.log_print("[GG Test] No GG transactions detected.")
                 self.simple_log_print("GG Test: no GG transactions detected.")
@@ -3524,10 +3523,6 @@ class RDPApp(tk.Tk):
                     )
 
                     entries = self._extract_rechnungen_gg_entries(prefix=prefix)
-                    if not self._wait_for_preview_ready(timeout=6.0):
-                        self.log_print(
-                            f"{prefix}Preview generation timed out; continuing with latest data."
-                        )
                     if not entries:
                         self.log_print(f"{prefix}No GG transactions detected.")
                         summary_line = self._build_gg_summary_line(aktenzeichen, [])
@@ -4262,50 +4257,6 @@ class RDPApp(tk.Tk):
         merged.sort(key=lambda item: (item.get("y", 0), item.get("x", 0)))
         return merged
 
-    def _annotate_rechnungen_preview(self, img, entries, scale):
-        if img is None:
-            return None
-        if not entries:
-            return img
-        try:
-            preview = img.convert("RGB")
-        except Exception:
-            preview = img
-        draw = ImageDraw.Draw(preview)
-        thickness = max(1, int(scale // 2) or 1)
-        for idx, entry in enumerate(entries, 1):
-            if isinstance(entry.get("amount_box"), (list, tuple)) and len(entry["amount_box"]) == 4:
-                base_x, base_y, base_w, base_h = entry["amount_box"]
-            else:
-                base_x = entry.get("x", 0)
-                base_y = entry.get("y", 0)
-                base_w = entry.get("w", 0)
-                base_h = entry.get("h", 0)
-
-            x = int(round(base_x * scale))
-            y = int(round(base_y * scale))
-            w = int(round(max(base_w, 1) * scale))
-            h = int(round(max(base_h, 1) * scale))
-            x1 = x + max(w, 1)
-            y1 = y + max(h, 1)
-            draw.rectangle([(x, y), (x1, y1)], outline="red", width=thickness)
-            label = f"{idx}: {entry.get('amount', '')}".strip()
-            if label:
-                text_x = x + 2
-                text_y = max(0, y - 14)
-                try:
-                    bbox = draw.textbbox((text_x, text_y), label)
-                except Exception:
-                    approx_w = max(32, 8 * len(label))
-                    approx_h = 14
-                    bbox = (text_x, text_y, text_x + approx_w, text_y + approx_h)
-                draw.rectangle(
-                    [(bbox[0] - 2, bbox[1] - 2), (bbox[2] + 2, bbox[3] + 2)],
-                    fill=(255, 255, 255),
-                )
-                draw.text((text_x, text_y), label, fill="black")
-        return preview
-
     def _select_rechnungen_amount_candidate(self, row, norm):
         tokens = row.get("tokens") or []
         row_x = row.get("x", 0)
@@ -4540,57 +4491,45 @@ class RDPApp(tk.Tk):
         return False
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
-        wait_token = self._prepare_preview_wait()
-        try:
-            img, lines, scale = self._capture_named_region_preview_and_lines(
-                "rechnungen_gg_region", prefix=prefix, label="GG"
+        _img, lines, _scale = self._capture_named_region_preview_and_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
+        )
+        if not lines:
+            return []
+
+        entries = self._parse_rechnungen_entries(lines, prefix=prefix)
+        gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
+
+        log_lines = []
+        if gg_entries:
+            log_lines.append(
+                f"{prefix}Detected {len(gg_entries)} GG transaction(s)."
             )
-            if img is None and not lines:
-                self._signal_preview_ready(wait_token=wait_token)
-                return []
+        else:
+            log_lines.append(f"{prefix}No GG transactions detected.")
 
-            entries = self._parse_rechnungen_entries(lines, prefix=prefix)
-            gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
+        for idx, entry in enumerate(gg_entries, 1):
+            amount = entry.get("amount", "") or "(no amount)"
+            detail = self._format_rechnungen_detail(entry)
+            label_display = (
+                entry.get("label")
+                or entry.get("label_normalized")
+                or "GG"
+            )
+            bounds = entry.get("amount_box")
+            bounds_txt = (
+                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                else ""
+            )
+            log_lines.append(
+                f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
+            )
 
-            log_lines = []
-            if gg_entries:
-                log_lines.append(
-                    f"{prefix}Detected {len(gg_entries)} GG transaction(s)."
-                )
-            else:
-                log_lines.append(f"{prefix}No GG transactions detected.")
+        for line in log_lines:
+            self.log_print(line)
 
-            for idx, entry in enumerate(gg_entries, 1):
-                amount = entry.get("amount", "") or "(no amount)"
-                detail = self._format_rechnungen_detail(entry)
-                label_display = (
-                    entry.get("label")
-                    or entry.get("label_normalized")
-                    or "GG"
-                )
-                bounds = entry.get("amount_box")
-                bounds_txt = (
-                    f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
-                    if isinstance(bounds, (list, tuple)) and len(bounds) == 4
-                    else ""
-                )
-                log_lines.append(
-                    f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
-                )
-
-            preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
-            if preview is not None:
-                self.show_preview(preview, wait_token=wait_token)
-            else:
-                self._signal_preview_ready(wait_token=wait_token)
-
-            for line in log_lines:
-                self.log_print(line)
-
-            return gg_entries
-        except Exception:
-            self._signal_preview_ready(wait_token=wait_token)
-            raise
+        return gg_entries
 
     def _summarize_rechnungen_entries(self, entries):
         def _copy(entry):
