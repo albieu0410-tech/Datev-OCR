@@ -4,7 +4,15 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
-from PIL import Image, ImageTk, ImageFilter, ImageOps, ImageStat, ImageDraw
+from PIL import (
+    Image,
+    ImageTk,
+    ImageFilter,
+    ImageOps,
+    ImageStat,
+    ImageDraw,
+    ImageEnhance,
+)
 import pandas as pd
 import pyautogui
 from pywinauto import Desktop
@@ -536,7 +544,12 @@ def normalize_gg_candidate(text: str) -> str:
     normalized = normalize_line(text)
     normalized = normalized.replace(":", " ")
     normalized = re.sub(r"[^A-Z0-9]", "", normalized.upper())
-    return normalized.translate(GG_LABEL_TRANSLATE)
+    translated = normalized.translate(GG_LABEL_TRANSLATE)
+    if len(translated) >= 2:
+        gg_pos = translated.find("GG")
+        if gg_pos > 0:
+            translated = translated[gg_pos:]
+    return translated
 
 
 def is_gg_label(text: str) -> bool:
@@ -3942,6 +3955,18 @@ class RDPApp(tk.Tk):
             base_auto = gray
         variants.append(base_auto)
 
+        try:
+            contrast_img = ImageEnhance.Contrast(gray).enhance(2.0)
+            variants.append(ImageOps.autocontrast(contrast_img))
+        except Exception:
+            pass
+
+        try:
+            bright_img = ImageEnhance.Brightness(gray).enhance(1.2)
+            variants.append(ImageOps.autocontrast(bright_img))
+        except Exception:
+            pass
+
         normalized_label = (label or "").strip().upper()
 
         if normalized_label == "GG":
@@ -3955,6 +3980,13 @@ class RDPApp(tk.Tk):
                 arr = np.array(gray, dtype=np.uint8)
                 if arr.size:
                     if _HAS_CV2:
+                        try:
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                            clahe_arr = clahe.apply(arr)
+                            clahe_img = Image.fromarray(clahe_arr, mode="L")
+                            variants.append(ImageOps.autocontrast(clahe_img))
+                        except Exception:
+                            pass
                         blur = cv2.GaussianBlur(arr, (3, 3), 0)
                         _, thresh = cv2.threshold(
                             blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
