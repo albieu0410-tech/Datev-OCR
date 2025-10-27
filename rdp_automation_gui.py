@@ -3476,6 +3476,10 @@ class RDPApp(tk.Tk):
             if not queries:
                 return
 
+            if queries:
+                self.clear_simple_log()
+            simple_lines = []
+
             skip_waits = self._should_skip_manual_waits()
             wait_setting = self.cfg.get(
                 "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
@@ -3490,72 +3494,81 @@ class RDPApp(tk.Tk):
             total = len(queries)
             for idx, (aktenzeichen, _row) in enumerate(queries, 1):
                 prefix = f"[GG {idx}/{total}] "
-                self.log_print(f"{prefix}Searching doc list for Aktenzeichen: {aktenzeichen}")
-                if not self._type_doclist_query(aktenzeichen, prefix=prefix):
+                simple_lines.append(f"{aktenzeichen}: (capturing GG...)")
+                self._render_simple_log_lines(simple_lines)
+                try:
                     self.log_print(
-                        f"{prefix}Unable to type Aktenzeichen. Skipping entry."
+                        f"{prefix}Searching doc list for Aktenzeichen: {aktenzeichen}"
                     )
-                    continue
-                if list_wait > 0:
-                    time.sleep(list_wait)
-                self.log_print(
-                    f"{prefix}Typed '{aktenzeichen}' into the document search box."
-                )
-                self._wait_for_doc_search_ready(
-                    prefix=prefix, reason="after Aktenzeichen search"
-                )
-                self._wait_for_doclist_ready(
-                    prefix=prefix, reason="after Aktenzeichen search"
-                )
+                    if not self._type_doclist_query(aktenzeichen, prefix=prefix):
+                        self.log_print(
+                            f"{prefix}Unable to type Aktenzeichen. Skipping entry."
+                        )
+                        simple_lines[-1] = f"{aktenzeichen}: (search failed)"
+                        self._render_simple_log_lines(simple_lines)
+                        continue
+                    if list_wait > 0:
+                        time.sleep(list_wait)
+                    self.log_print(
+                        f"{prefix}Typed '{aktenzeichen}' into the document search box."
+                    )
+                    self._wait_for_doc_search_ready(
+                        prefix=prefix, reason="after Aktenzeichen search"
+                    )
+                    self._wait_for_doclist_ready(
+                        prefix=prefix, reason="after Aktenzeichen search"
+                    )
 
-                entries = self._extract_rechnungen_gg_entries(prefix=prefix)
-                if not entries:
-                    self.log_print(f"{prefix}No GG transactions detected.")
-                    self.simple_log_print(f"{aktenzeichen}: (no GG)")
+                    entries = self._extract_rechnungen_gg_entries(prefix=prefix)
+                    if not entries:
+                        self.log_print(f"{prefix}No GG transactions detected.")
+                        summary_line = self._build_gg_summary_line(aktenzeichen, [])
+                        simple_lines[-1] = summary_line
+                        self._render_simple_log_lines(simple_lines)
+                        self.log_print(f"{prefix}{summary_line}")
+                        results.append(
+                            {
+                                "aktenzeichen": aktenzeichen,
+                                "gg_detected": False,
+                                "gg_count": 0,
+                                "gg_amounts": "",
+                                "gg_dates": "",
+                                "gg_invoices": "",
+                                "gg_raw": "",
+                            }
+                        )
+                        continue
+
+                    amounts = [entry.get("amount", "") or "" for entry in entries]
+                    dates = [entry.get("date", "") or "" for entry in entries]
+                    invoices = [entry.get("invoice", "") or "" for entry in entries]
+                    raw_rows = [entry.get("raw", "") or "" for entry in entries]
+
+                    for entry_idx, entry in enumerate(entries, 1):
+                        detail = self._format_rechnungen_detail(entry)
+                        amount = entry.get("amount", "") or "(no amount)"
+                        self.log_print(f"{prefix}#{entry_idx}: {amount}{detail}")
+
                     results.append(
                         {
                             "aktenzeichen": aktenzeichen,
-                            "gg_detected": False,
-                            "gg_count": 0,
-                            "gg_amounts": "",
-                            "gg_dates": "",
-                            "gg_invoices": "",
-                            "gg_raw": "",
+                            "gg_detected": True,
+                            "gg_count": len(entries),
+                            "gg_amounts": "; ".join(filter(None, amounts)),
+                            "gg_dates": "; ".join(filter(None, dates)),
+                            "gg_invoices": "; ".join(filter(None, invoices)),
+                            "gg_raw": " || ".join(filter(None, raw_rows)),
                         }
                     )
-                    continue
 
-                amounts = [entry.get("amount", "") or "" for entry in entries]
-                dates = [entry.get("date", "") or "" for entry in entries]
-                invoices = [entry.get("invoice", "") or "" for entry in entries]
-                raw_rows = [entry.get("raw", "") or "" for entry in entries]
-
-                for entry_idx, entry in enumerate(entries, 1):
-                    detail = self._format_rechnungen_detail(entry)
-                    amount = entry.get("amount", "") or "(no amount)"
-                    self.log_print(f"{prefix}#{entry_idx}: {amount}{detail}")
-
-                results.append(
-                    {
-                        "aktenzeichen": aktenzeichen,
-                        "gg_detected": True,
-                        "gg_count": len(entries),
-                        "gg_amounts": "; ".join(filter(None, amounts)),
-                        "gg_dates": "; ".join(filter(None, dates)),
-                        "gg_invoices": "; ".join(filter(None, invoices)),
-                        "gg_raw": " || ".join(filter(None, raw_rows)),
-                    }
-                )
-
-                summary_parts = []
-                for entry in entries:
-                    amount = entry.get("amount", "") or "(no amount)"
-                    detail = self._format_rechnungen_detail(entry)
-                    summary_parts.append(f"{amount}{detail}")
-                if summary_parts:
-                    self.simple_log_print(
-                        f"{aktenzeichen}: {'; '.join(summary_parts)}"
-                    )
+                    summary_line = self._build_gg_summary_line(aktenzeichen, entries)
+                    simple_lines[-1] = summary_line
+                    self._render_simple_log_lines(simple_lines)
+                    self.log_print(f"{prefix}{summary_line}")
+                except Exception:
+                    simple_lines[-1] = f"{aktenzeichen}: (error)"
+                    self._render_simple_log_lines(simple_lines)
+                    raise
 
             if results:
                 pd.DataFrame(results).to_csv(
@@ -4623,6 +4636,21 @@ class RDPApp(tk.Tk):
         if not parts:
             return ""
         return f" ({' | '.join(parts)})"
+
+    def _build_gg_summary_line(self, aktenzeichen, entries):
+        label = aktenzeichen or "(unbekannt)"
+        if not entries:
+            return f"{label}: (no GG)"
+        summary_parts = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            amount = entry.get("amount") or "(no amount)"
+            detail = self._format_rechnungen_detail(entry)
+            summary_parts.append(f"{amount}{detail}")
+        if not summary_parts:
+            return f"{label}: (no GG)"
+        return f"{label}: {'; '.join(summary_parts)}"
 
     def _log_rechnungen_summary(self, prefix, summary):
         if not summary:
@@ -5809,6 +5837,19 @@ class RDPApp(tk.Tk):
         self.simple_log.insert(tk.END, str(text) + "\n")
         self.simple_log.see(tk.END)
         self.simple_log.configure(state="disabled")
+        self.update_idletasks()
+
+    def _render_simple_log_lines(self, lines):
+        if not hasattr(self, "simple_log"):
+            return
+        self.simple_log.configure(state="normal")
+        self.simple_log.delete("1.0", tk.END)
+        for line in lines or []:
+            if line is None:
+                continue
+            self.simple_log.insert(tk.END, str(line) + "\n")
+        self.simple_log.configure(state="disabled")
+        self.simple_log.see(tk.END)
         self.update_idletasks()
 
     def _should_skip_manual_waits(self):
