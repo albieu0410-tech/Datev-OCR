@@ -2,9 +2,17 @@
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
-from PIL import Image, ImageTk, ImageFilter, ImageOps, ImageStat, ImageDraw
+from PIL import (
+    Image,
+    ImageTk,
+    ImageFilter,
+    ImageOps,
+    ImageStat,
+    ImageDraw,
+    ImageEnhance,
+)
 import pandas as pd
 import pyautogui
 from pywinauto import Desktop
@@ -86,6 +94,11 @@ DEFAULTS = {
     "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
     "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
     "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+    "rechnungen_gg_region": [0.55, 0.30, 0.35, 0.40],
+    "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
+    "rechnungen_search_wait": 1.2,
+    "rechnungen_region_wait": 0.8,
+    "rechnungen_overlay_skip_waits": False,
     "log_folder": LOG_DIR,
     "log_extract_results_csv": "streitwert_log_extract.csv",
     # New: AZ Instanz table detection
@@ -517,6 +530,41 @@ def normalize_for_token_match(text: str) -> str:
     text = unicodedata.normalize("NFKC", str(text))
     text = re.sub(r"\s+", " ", text).strip().lower()
     return text.translate(TOKEN_MATCH_TRANSLATE)
+
+
+GG_LABEL_TRANSLATE = str.maketrans({"6": "G", "0": "G", "O": "G", "Q": "G", "C": "G", "€": "G"})
+GG_EXTENDED_SUFFIX_RE = re.compile(
+    r"^(?:GEMAESS|GEMAE?S|GEM|GEMAES)[A-Z0-9]*URT[A-Z0-9]*$"
+)
+
+
+def normalize_gg_candidate(text: str) -> str:
+    if not text:
+        return ""
+    normalized = normalize_line(text)
+    normalized = normalized.replace(":", " ")
+    normalized = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+    translated = normalized.translate(GG_LABEL_TRANSLATE)
+    if len(translated) >= 2:
+        gg_pos = translated.find("GG")
+        if gg_pos > 0:
+            translated = translated[gg_pos:]
+    return translated
+
+
+def is_gg_label(text: str) -> bool:
+    normalized = normalize_gg_candidate(text)
+    if not normalized:
+        return False
+    if normalized == "GG":
+        return True
+    if normalized.startswith("GG"):
+        remainder = normalized[2:]
+        if not remainder:
+            return True
+        if GG_EXTENDED_SUFFIX_RE.match(remainder):
+            return True
+    return False
 
 
 AMOUNT_RE = re.compile(
@@ -1169,7 +1217,14 @@ def extract_amount_from_lines(lines, keyword=None, min_value=None):
 # ------------------ App Class ------------------
 class RDPApp(tk.Tk):
     # --- Regex and constants (class-level) ---
-    _KFB_RE = re.compile(r"\bKFB\b", re.IGNORECASE)
+    _KFB_RE = re.compile(
+        r"(?<![0-9A-Za-z])k\s*[-./]?\s*f\s*[-./]?\s*b",
+        re.IGNORECASE,
+    )
+    _KFB_WORD_RE = re.compile(
+        r"kosten\s*festsetzungs\s*beschl(?:uss|uß|\.)?",
+        re.IGNORECASE,
+    )
     # European-style numbers like 1.234,56 or 1234,56 or 1 234,56
     _AMT_NUM_RE = re.compile(r"\b\d{1,3}(?:[\.\s]\d{3})*(?:,\d{2})?\b")
     # Hints that amount-in-words is present on page
@@ -1738,6 +1793,9 @@ class RDPApp(tk.Tk):
         self.live_preview_imgtk = None
         self.live_preview_running = False
         self._ocr_log_paths = {}
+        self._preview_ready_event = threading.Event()
+        self._preview_last_token = 0
+        self._preview_target_token = 0
 
         # Initialize MSS in the main thread
         get_mss()
@@ -1877,7 +1935,16 @@ class RDPApp(tk.Tk):
         self.fees_bad_var = tk.StringVar(
             value=self.cfg.get("fees_bad_prefixes", "SVRAGS;SVR-AGS;Skrags;SV RAGS")
         )
-        ttk.Entry(fees_frame, textvariable=self.fees_bad_var, width=40).pack(anchor="w")
+        bad_frame = ttk.Frame(fees_frame)
+        bad_frame.pack(anchor="w")
+        ttk.Entry(bad_frame, textvariable=self.fees_bad_var, width=40).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(
+            bad_frame,
+            text="Edit...",
+            command=self.edit_fees_bad_prefixes,
+        ).pack(side=tk.LEFT, padx=4)
 
         # Maximum page clicks
         mp = ttk.Frame(fees_frame)
@@ -1915,6 +1982,12 @@ class RDPApp(tk.Tk):
             text="Test Fee Extraction",
             command=self.test_fees,
         ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(
+            fees_frame,
+            text="Test Seiten Clicks",
+            command=self.test_fees_seiten_clicks,
+        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Button(
             fees_frame,
@@ -2359,9 +2432,73 @@ class RDPApp(tk.Tk):
 
         ttk.Button(
             rechn_frame,
+            text="Pick GG Bezeichnung Region",
+            command=self.pick_rechnungen_gg_region,
+        ).pack(anchor="w", pady=(0, 2))
+
+        gg_box = self.cfg.get("rechnungen_gg_region")
+        if (
+            isinstance(gg_box, (list, tuple))
+            and len(gg_box) == 4
+            and all(isinstance(v, (int, float)) for v in gg_box)
+        ):
+            gg_txt = (
+                f"{gg_box[0]:.3f}, {gg_box[1]:.3f}, "
+                f"{gg_box[2]:.3f}, {gg_box[3]:.3f}"
+            )
+        else:
+            gg_txt = ""
+        self.rechnungen_gg_region_var = tk.StringVar(value=gg_txt)
+        ttk.Entry(
+            rechn_frame,
+            textvariable=self.rechnungen_gg_region_var,
+            width=40,
+            state="readonly",
+        ).pack(anchor="w", pady=(0, 6))
+
+        timing_box = ttk.LabelFrame(rechn_frame, text="Timing & Options")
+        timing_box.pack(fill=tk.X, pady=(0, 6))
+
+        search_row = ttk.Frame(timing_box)
+        search_row.pack(anchor="w", pady=(0, 2))
+        ttk.Label(search_row, text="Search wait (sec)").pack(side=tk.LEFT)
+        self.rechnungen_search_wait_var = tk.StringVar(
+            value=str(self.cfg.get("rechnungen_search_wait", 1.2))
+        )
+        ttk.Entry(
+            search_row, textvariable=self.rechnungen_search_wait_var, width=6
+        ).pack(side=tk.LEFT, padx=6)
+
+        region_row = ttk.Frame(timing_box)
+        region_row.pack(anchor="w", pady=(0, 2))
+        ttk.Label(region_row, text="Region wait (sec)").pack(side=tk.LEFT)
+        self.rechnungen_region_wait_var = tk.StringVar(
+            value=str(self.cfg.get("rechnungen_region_wait", 0.8))
+        )
+        ttk.Entry(
+            region_row, textvariable=self.rechnungen_region_wait_var, width=6
+        ).pack(side=tk.LEFT, padx=6)
+
+        self.rechnungen_skip_waits_var = tk.BooleanVar(
+            value=self.cfg.get("rechnungen_overlay_skip_waits", False)
+        )
+        ttk.Checkbutton(
+            timing_box,
+            text="Only wait for loading overlays (ignore manual delays)",
+            variable=self.rechnungen_skip_waits_var,
+        ).pack(anchor="w", pady=(2, 0))
+
+        ttk.Button(
+            rechn_frame,
             text="Test Rechnungen Extraction",
             command=self.test_rechnungen_threaded,
         ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(
+            rechn_frame,
+            text="Test GG Extraction",
+            command=self.test_rechnungen_gg_threaded,
+        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Label(rechn_frame, text="Rechnungen-only CSV").pack(anchor="w", pady=(6, 0))
         self.rechnungen_only_csv_var = tk.StringVar(
@@ -2377,6 +2514,22 @@ class RDPApp(tk.Tk):
             rechn_frame,
             text="Run Rechnungen Extraction",
             command=self.run_rechnungen_only_threaded,
+        ).pack(anchor="w", pady=(6, 0))
+
+        ttk.Label(rechn_frame, text="GG Extract CSV").pack(anchor="w", pady=(6, 0))
+        self.rechnungen_gg_csv_var = tk.StringVar(
+            value=self.cfg.get(
+                "rechnungen_gg_results_csv", "rechnungen_gg_results.csv"
+            )
+        )
+        ttk.Entry(
+            rechn_frame, textvariable=self.rechnungen_gg_csv_var, width=40
+        ).pack(anchor="w", pady=(0, 4))
+
+        ttk.Button(
+            rechn_frame,
+            text="Run GG Extraction",
+            command=self.run_rechnungen_gg_threaded,
         ).pack(anchor="w", pady=(6, 0))
 
         # --- Log tab ---
@@ -2709,6 +2862,19 @@ class RDPApp(tk.Tk):
                     f"{rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f}, {rb[3]:.3f}"
                 )
             self.log_print(f"Rechnungen region set: {rb}")
+
+    def pick_rechnungen_gg_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the GG Bezeichnung area, then OK.",
+            "Hover BOTTOM-RIGHT of the GG area, then OK.",
+        )
+        if rb:
+            self.cfg["rechnungen_gg_region"] = rb
+            if hasattr(self, "rechnungen_gg_region_var"):
+                self.rechnungen_gg_region_var.set(
+                    f"{rb[0]:.3f}, {rb[1]:.3f}, {rb[2]:.3f}, {rb[3]:.3f}"
+                )
+            self.log_print(f"GG region set: {rb}")
 
     def pick_fees_file_search_region(self):
         rb = self._two_click_box(
@@ -3163,6 +3329,39 @@ class RDPApp(tk.Tk):
         except Exception as e:
             self.log_print(f"[Rechnungen Test] ERROR: {e!r}")
 
+    def test_rechnungen_gg_threaded(self):
+        t = threading.Thread(target=self.test_rechnungen_gg, daemon=True)
+        t.start()
+
+    def test_rechnungen_gg(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            self.clear_preview()
+            self.clear_simple_log()
+            entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
+            if not entries:
+                self.log_print("[GG Test] No GG transactions detected.")
+                self.simple_log_print("GG Test: no GG transactions detected.")
+                return
+            summary_parts = []
+            for idx, entry in enumerate(entries, 1):
+                detail = self._format_rechnungen_detail(entry)
+                amount = entry.get("amount", "") or "(no amount)"
+                self.log_print(f"[GG Test] #{idx}: {amount}{detail}")
+                summary_parts.append(f"{amount}{detail}")
+            if summary_parts:
+                self.simple_log_print(f"GG Test: {'; '.join(summary_parts)}")
+        except Exception as e:
+            self.log_print(f"[GG Test] ERROR: {e!r}")
+
     def run_rechnungen_only_threaded(self):
         t = threading.Thread(target=self.run_rechnungen_only, daemon=True)
         t.start()
@@ -3188,10 +3387,17 @@ class RDPApp(tk.Tk):
             if not queries:
                 return
 
+            if queries:
+                self.clear_simple_log()
             skip_waits = self._should_skip_manual_waits()
-            list_wait = (
-                0.0 if skip_waits else float(self.cfg.get("post_search_wait", 1.2))
+            wait_setting = self.cfg.get(
+                "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
             )
+            try:
+                wait_seconds = float(wait_setting)
+            except Exception:
+                wait_seconds = float(DEFAULTS.get("rechnungen_search_wait", 1.2))
+            list_wait = 0.0 if skip_waits else max(0.0, wait_seconds)
 
             results = []
             total = len(queries)
@@ -3211,7 +3417,6 @@ class RDPApp(tk.Tk):
                 self.log_print(
                     f"{prefix}Typed '{aktenzeichen}' into the document search box."
                 )
-                inst_info = self.detect_instance(prefix=prefix)
                 inst_info = self.detect_instance(prefix=prefix)
 
                 self._wait_for_doc_search_ready(
@@ -3251,6 +3456,140 @@ class RDPApp(tk.Tk):
 
         except Exception as e:
             self.log_print(f"[Rechnungen] ERROR: {e!r}")
+
+    def run_rechnungen_gg_threaded(self):
+        t = threading.Thread(target=self.run_rechnungen_gg, daemon=True)
+        t.start()
+
+    def run_rechnungen_gg(self):
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+            if not self.current_rect:
+                self.connect_rdp()
+                if not self.current_rect:
+                    return
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+
+            if not self._doclist_abs_rect():
+                self.log_print("Doc list region is not configured. Please re-run calibration.")
+                return
+
+            queries = self._gather_aktenzeichen()
+            if not queries:
+                return
+
+            if queries:
+                self.clear_preview()
+                self.clear_simple_log()
+            simple_lines = []
+
+            skip_waits = self._should_skip_manual_waits()
+            wait_setting = self.cfg.get(
+                "rechnungen_search_wait", self.cfg.get("post_search_wait", 1.2)
+            )
+            try:
+                wait_seconds = float(wait_setting)
+            except Exception:
+                wait_seconds = float(DEFAULTS.get("rechnungen_search_wait", 1.2))
+            list_wait = 0.0 if skip_waits else max(0.0, wait_seconds)
+
+            results = []
+            total = len(queries)
+            for idx, (aktenzeichen, _row) in enumerate(queries, 1):
+                prefix = f"[GG {idx}/{total}] "
+                simple_lines.append(f"{aktenzeichen}: (capturing GG...)")
+                self._render_simple_log_lines(simple_lines)
+                try:
+                    self.log_print(
+                        f"{prefix}Searching doc list for Aktenzeichen: {aktenzeichen}"
+                    )
+                    if not self._type_doclist_query(aktenzeichen, prefix=prefix):
+                        self.log_print(
+                            f"{prefix}Unable to type Aktenzeichen. Skipping entry."
+                        )
+                        simple_lines[-1] = f"{aktenzeichen}: (search failed)"
+                        self._render_simple_log_lines(simple_lines)
+                        continue
+                    if list_wait > 0:
+                        time.sleep(list_wait)
+                    self.log_print(
+                        f"{prefix}Typed '{aktenzeichen}' into the document search box."
+                    )
+                    self._wait_for_doc_search_ready(
+                        prefix=prefix, reason="after Aktenzeichen search"
+                    )
+                    self._wait_for_doclist_ready(
+                        prefix=prefix, reason="after Aktenzeichen search"
+                    )
+
+                    entries = self._extract_rechnungen_gg_entries(prefix=prefix)
+                    if not entries:
+                        self.log_print(f"{prefix}No GG transactions detected.")
+                        summary_line = self._build_gg_summary_line(aktenzeichen, [])
+                        simple_lines[-1] = summary_line
+                        self._render_simple_log_lines(simple_lines)
+                        self.log_print(f"{prefix}{summary_line}")
+                        results.append(
+                            {
+                                "aktenzeichen": aktenzeichen,
+                                "gg_detected": False,
+                                "gg_count": 0,
+                                "gg_amounts": "",
+                                "gg_dates": "",
+                                "gg_invoices": "",
+                                "gg_raw": "",
+                            }
+                        )
+                        continue
+
+                    amounts = [entry.get("amount", "") or "" for entry in entries]
+                    dates = [entry.get("date", "") or "" for entry in entries]
+                    invoices = [entry.get("invoice", "") or "" for entry in entries]
+                    raw_rows = [entry.get("raw", "") or "" for entry in entries]
+
+                    for entry_idx, entry in enumerate(entries, 1):
+                        detail = self._format_rechnungen_detail(entry)
+                        amount = entry.get("amount", "") or "(no amount)"
+                        self.log_print(f"{prefix}#{entry_idx}: {amount}{detail}")
+
+                    results.append(
+                        {
+                            "aktenzeichen": aktenzeichen,
+                            "gg_detected": True,
+                            "gg_count": len(entries),
+                            "gg_amounts": "; ".join(filter(None, amounts)),
+                            "gg_dates": "; ".join(filter(None, dates)),
+                            "gg_invoices": "; ".join(filter(None, invoices)),
+                            "gg_raw": " || ".join(filter(None, raw_rows)),
+                        }
+                    )
+
+                    summary_line = self._build_gg_summary_line(aktenzeichen, entries)
+                    simple_lines[-1] = summary_line
+                    self._render_simple_log_lines(simple_lines)
+                    self.log_print(f"{prefix}{summary_line}")
+                except Exception:
+                    simple_lines[-1] = f"{aktenzeichen}: (error)"
+                    self._render_simple_log_lines(simple_lines)
+                    raise
+
+            if results:
+                pd.DataFrame(results).to_csv(
+                    self.rechnungen_gg_csv_var.get(),
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+                self.log_print(
+                    "Done. Saved GG extraction results to "
+                    f"{self.rechnungen_gg_csv_var.get()}"
+                )
+            else:
+                self.log_print("No GG transactions were captured from the Excel list.")
+
+        except Exception as e:
+            self.log_print(f"[GG Extraction] ERROR: {e!r}")
 
     def run_log_extraction_threaded(self):
         t = threading.Thread(target=self.run_log_extraction, daemon=True)
@@ -3634,39 +3973,446 @@ class RDPApp(tk.Tk):
         except Exception:
             return None
 
-    def _capture_rechnungen_lines(self, prefix=""):
+    def _prepare_ocr_variants(self, img, label=""):
+        variants = []
+        if img is None:
+            return variants
+
+        try:
+            gray = img.convert("L")
+        except Exception:
+            try:
+                gray = ImageOps.grayscale(img)
+            except Exception:
+                return [img]
+
+        try:
+            base_auto = ImageOps.autocontrast(gray)
+        except Exception:
+            base_auto = gray
+        variants.append(base_auto)
+
+        try:
+            contrast_img = ImageEnhance.Contrast(gray).enhance(2.0)
+            variants.append(ImageOps.autocontrast(contrast_img))
+        except Exception:
+            pass
+
+        try:
+            bright_img = ImageEnhance.Brightness(gray).enhance(1.2)
+            variants.append(ImageOps.autocontrast(bright_img))
+        except Exception:
+            pass
+
+        normalized_label = (label or "").strip().upper()
+
+        if normalized_label == "GG":
+            try:
+                inverted = ImageOps.autocontrast(ImageOps.invert(gray))
+                variants.append(inverted)
+            except Exception:
+                pass
+
+            try:
+                arr = np.array(gray, dtype=np.uint8)
+                if arr.size:
+                    if _HAS_CV2:
+                        try:
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                            clahe_arr = clahe.apply(arr)
+                            clahe_img = Image.fromarray(clahe_arr)
+                            if clahe_img.mode != "L":
+                                clahe_img = clahe_img.convert("L")
+                            variants.append(ImageOps.autocontrast(clahe_img))
+                        except Exception:
+                            pass
+                        blur = cv2.GaussianBlur(arr, (3, 3), 0)
+                        _, thresh = cv2.threshold(
+                            blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                        )
+                    else:
+                        threshold = np.percentile(arr, 60)
+                        thresh = (arr <= threshold).astype(np.uint8) * 255
+                    thr_img = Image.fromarray(thresh.astype(np.uint8))
+                    if thr_img.mode != "L":
+                        thr_img = thr_img.convert("L")
+                    try:
+                        if ImageStat.Stat(thr_img).mean[0] > 127:
+                            thr_img = ImageOps.invert(thr_img)
+                    except Exception:
+                        pass
+                    try:
+                        thr_img = ImageOps.autocontrast(thr_img)
+                    except Exception:
+                        pass
+                    variants.append(thr_img)
+            except Exception:
+                pass
+
+        unique = []
+        seen = set()
+        for candidate in variants:
+            if candidate is None:
+                continue
+            try:
+                hist = tuple(candidate.histogram())
+                key = (candidate.mode, candidate.size, hist)
+            except Exception:
+                key = (candidate.mode, candidate.size)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+
+        return unique or [base_auto]
+
+    def _get_rechnungen_region_wait(self):
+        wait_setting = self.cfg.get(
+            "rechnungen_region_wait",
+            DEFAULTS.get("rechnungen_region_wait", 0.0),
+        )
+        try:
+            wait_seconds = float(wait_setting)
+        except Exception:
+            wait_seconds = float(DEFAULTS.get("rechnungen_region_wait", 0.0))
+        return max(0.0, wait_seconds)
+
+    def _wait_for_rechnungen_region(self, cfg_key, prefix="", label=""):
+        wait_seconds = self._get_rechnungen_region_wait()
+        if wait_seconds <= 0 or self._should_skip_manual_waits():
+            return
+        name = label or cfg_key.replace("_", " ").title()
+        self.log_print(f"{prefix}Waiting {wait_seconds:.2f}s for {name} region.")
+        time.sleep(wait_seconds)
+
+    def _capture_named_region_preview_and_lines(
+        self, cfg_key, prefix="", label="", show_preview=False
+    ):
         if not self.current_rect:
             self.log_print(
                 f"{prefix}No active RDP rectangle. Connect before capturing."
             )
-            return []
-        if "rechnungen_region" not in self.cfg:
-            self.log_print(f"{prefix}Rechnungen region is not configured.")
-            return []
+            return None, [], 1
+        if not self._has(cfg_key):
+            name = label or cfg_key.replace("_", " ").title()
+            self.log_print(f"{prefix}{name} region is not configured.")
+            return None, [], 1
         try:
-            # Get absolute coordinates
-            x, y, w, h = rel_to_abs(self.current_rect, self._get("rechnungen_region"))
-            # Use class method for capture
-            img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
+            if cfg_key in {"rechnungen_region", "rechnungen_gg_region"}:
+                self._wait_for_rechnungen_region(cfg_key, prefix=prefix, label=label)
+            x, y, w, h = rel_to_abs(self.current_rect, self._get(cfg_key))
             scale = max(1, int(self.upscale_var.get() or 3))
+            img = self._grab_region_color(x, y, w, h, upscale_x=scale)
+            if show_preview:
+                try:
+                    self.show_preview(img)
+                except Exception:
+                    pass
         except Exception as exc:
-            self.log_print(f"{prefix}Failed to capture Rechnungen region: {exc}")
-            return []
-        df = do_ocr_data(img, lang=self.lang_var.get().strip() or "deu+eng", psm=6)
-        lines = lines_from_tsv(df, scale=scale)
-        self.log_print(f"{prefix}Rechnungen OCR lines: {len(lines)}.")
+            name = label or cfg_key.replace("_", " ").title()
+            self.log_print(f"{prefix}Failed to capture {name} region: {exc}")
+            return None, [], 1
+        variants = self._prepare_ocr_variants(img, label=label)
+        lines = []
+        seen_lines = set()
+        for variant in variants:
+            try:
+                df = do_ocr_data(
+                    variant, lang=self.lang_var.get().strip() or "deu+eng", psm=6
+                )
+            except Exception:
+                continue
+            variant_lines = lines_from_tsv(df, scale=scale)
+            for entry in variant_lines:
+                if not (
+                    isinstance(entry, (list, tuple))
+                    and len(entry) == 5
+                ):
+                    continue
+                x, y, w, h, text = entry
+                text_key = " ".join(str(text).split()).lower()
+                key = (
+                    int(round(x / 4)) if x is not None else 0,
+                    int(round(y / 4)) if y is not None else 0,
+                    int(round(w / 4)) if w is not None else 0,
+                    int(round(h / 4)) if h is not None else 0,
+                    text_key,
+                )
+                if key in seen_lines:
+                    continue
+                seen_lines.add(key)
+                lines.append(entry)
+        lines.sort(key=lambda x: (x[1], x[0]))
+        name = label or cfg_key.replace("_", " ").title()
+        self.log_print(f"{prefix}{name} OCR lines: {len(lines)}.")
+        return img, lines, scale
+
+    def _capture_named_region_lines(
+        self, cfg_key, prefix="", label="", show_preview=False
+    ):
+        img, lines, _scale = self._capture_named_region_preview_and_lines(
+            cfg_key, prefix=prefix, label=label, show_preview=show_preview
+        )
         return lines
 
+    def _capture_rechnungen_lines(self, prefix=""):
+        return self._capture_named_region_lines(
+            "rechnungen_region", prefix=prefix, label="Rechnungen"
+        )
+
+    def _capture_rechnungen_gg_lines(self, prefix=""):
+        return self._capture_named_region_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
+        )
+
+    def _merge_ocr_rows(self, lines):
+        if not lines:
+            return []
+
+        def _safe_number(value, default=0.0):
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        heights = [
+            _safe_number(h, 0.0)
+            for _, _, _, h, _ in lines
+            if isinstance(h, (int, float)) and h and _safe_number(h) > 0
+        ]
+        heights.sort()
+        median_h = heights[len(heights) // 2] if heights else 12.0
+        tolerance = max(4.0, median_h * 0.6)
+
+        groups = []
+        for entry in sorted(lines, key=lambda x: (x[1], x[0])):
+            if not (isinstance(entry, (list, tuple)) and len(entry) == 5):
+                continue
+            x, y, w, h, text = entry
+            raw_text = (text or "").strip()
+            if not raw_text:
+                continue
+            x_val = _safe_number(x)
+            y_val = _safe_number(y)
+            w_val = max(_safe_number(w), 0.0)
+            h_val = max(_safe_number(h, median_h), 0.0) or median_h
+            center = y_val + h_val / 2.0
+
+            target = None
+            for group in groups:
+                if abs(center - group["center"]) <= tolerance:
+                    target = group
+                    break
+
+            if target is None:
+                target = {
+                    "items": [],
+                    "min_x": x_val,
+                    "min_y": y_val,
+                    "max_x": x_val + max(w_val, 1.0),
+                    "max_y": y_val + max(h_val, 1.0),
+                    "center": center,
+                }
+                groups.append(target)
+            else:
+                target["min_x"] = min(target["min_x"], x_val)
+                target["min_y"] = min(target["min_y"], y_val)
+                target["max_x"] = max(target["max_x"], x_val + max(w_val, 1.0))
+                target["max_y"] = max(target["max_y"], y_val + max(h_val, 1.0))
+                target["center"] = (target["min_y"] + target["max_y"]) / 2.0
+
+            target["items"].append(
+                {
+                    "x": x_val,
+                    "y": y_val,
+                    "w": w_val,
+                    "h": h_val,
+                    "text": raw_text,
+                }
+            )
+
+        merged = []
+        for group in groups:
+            items_sorted = sorted(group["items"], key=lambda item: item["x"])
+            pieces = [item["text"] for item in items_sorted if item.get("text")]
+            if not pieces:
+                continue
+            combined = " ".join(pieces).strip()
+            if not combined:
+                continue
+            min_x = int(round(group["min_x"]))
+            min_y = int(round(group["min_y"]))
+            width = int(round(max(1.0, group["max_x"] - group["min_x"])))
+            height = int(round(max(1.0, group["max_y"] - group["min_y"])))
+            tokens = [
+                {
+                    "x": int(round(item.get("x", 0.0))),
+                    "y": int(round(item.get("y", 0.0))),
+                    "w": int(round(max(item.get("w", 0.0), 1.0))),
+                    "h": int(round(max(item.get("h", 0.0), 1.0))),
+                    "text": item.get("text", ""),
+                }
+                for item in items_sorted
+            ]
+            merged.append(
+                {
+                    "x": min_x,
+                    "y": min_y,
+                    "w": width,
+                    "h": height,
+                    "text": combined,
+                    "tokens": tokens,
+                }
+            )
+
+        merged.sort(key=lambda item: (item.get("y", 0), item.get("x", 0)))
+        return merged
+
+    def _select_rechnungen_amount_candidate(self, row, norm):
+        tokens = row.get("tokens") or []
+        row_x = row.get("x", 0)
+        row_y = row.get("y", 0)
+        row_w = row.get("w", 0)
+        row_h = row.get("h", 0)
+        candidates = []
+        seen = set()
+
+        for token in tokens:
+            raw = token.get("text", "")
+            if not raw:
+                continue
+            token_x = token.get("x", row_x)
+            key_base = int(round(token_x))
+            for amt in find_amount_candidates(raw):
+                display = clean_amount_display(amt.get("display")) if amt else None
+                if not display:
+                    continue
+                key = (display, key_base)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "display": display,
+                        "value": amt.get("value"),
+                        "x": token_x,
+                        "box": (
+                            int(round(token.get("x", row_x))),
+                            int(round(token.get("y", row_y))),
+                            int(round(max(token.get("w", 0) or 1, 1))),
+                            int(round(max(token.get("h", 0) or 1, 1))),
+                        ),
+                        "source": raw.strip(),
+                    }
+                )
+
+        if not candidates:
+            key_base = int(round(row_x))
+            for amt in find_amount_candidates(norm):
+                display = clean_amount_display(amt.get("display")) if amt else None
+                if not display:
+                    continue
+                key = (display, key_base)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "display": display,
+                        "value": amt.get("value"),
+                        "x": row_x,
+                        "box": (
+                            int(round(row_x)),
+                            int(round(row_y)),
+                            int(round(max(row_w, 1))),
+                            int(round(max(row_h, 1))),
+                        ),
+                        "source": norm.strip(),
+                    }
+                )
+
+        if not candidates:
+            return {}
+
+        zero = Decimal("0")
+
+        def sort_key(candidate):
+            value = candidate.get("value")
+            positive = 0 if value is not None and value > zero else 1
+            x_coord = candidate.get("x", row_x)
+            magnitude = -value if value is not None else Decimal("0")
+            return (positive, x_coord, magnitude)
+
+        candidates.sort(key=sort_key)
+        return candidates[0]
+
+    def _extract_rechnungen_label_info(self, row, norm):
+        tokens = row.get("tokens") or []
+        row_x = row.get("x", 0)
+        row_y = row.get("y", 0)
+        row_w = max(row.get("w", 0), 1)
+        label_tokens = []
+
+        for token in tokens:
+            raw = token.get("text", "")
+            if not raw:
+                continue
+            normalized = normalize_line(raw)
+            cleaned = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+            if not cleaned or not re.search(r"[A-Z]", cleaned):
+                continue
+            label_tokens.append(
+                {
+                    "raw": raw.strip(),
+                    "clean": cleaned,
+                    "x": token.get("x", row_x),
+                    "y": token.get("y", row_y),
+                    "w": int(round(max(token.get("w", 0), 1))),
+                    "h": int(round(max(token.get("h", 0), 1))),
+                }
+            )
+
+        if not label_tokens:
+            return {"display": "", "normalized": normalize_gg_candidate(norm), "box": None}
+
+        label_tokens.sort(key=lambda info: info.get("x", row_x))
+        cutoff = row_x + row_w * 0.55
+        tail = [info for info in label_tokens if info.get("x", row_x) >= cutoff]
+        if not tail:
+            tail = label_tokens[-3:]
+
+        combined_raw = " ".join(info["raw"] for info in tail if info.get("raw"))
+        combined_clean = "".join(info.get("clean", "") for info in tail)
+        normalized = normalize_gg_candidate(combined_raw or combined_clean)
+
+        min_x = min(info.get("x", row_x) for info in tail)
+        min_y = min(info.get("y", row_y) for info in tail)
+        max_x = max(info.get("x", row_x) + max(info.get("w", 1), 1) for info in tail)
+        max_y = max(info.get("y", row_y) + max(info.get("h", 1), 1) for info in tail)
+        box = (
+            int(round(min_x)),
+            int(round(min_y)),
+            int(round(max_x - min_x)),
+            int(round(max_y - min_y)),
+        )
+
+        return {
+            "display": combined_raw.strip() or combined_clean,
+            "normalized": normalized or normalize_gg_candidate(norm),
+            "box": box,
+        }
+
     def _parse_rechnungen_entries(self, lines, prefix=""):
+        merged_lines = self._merge_ocr_rows(lines)
         entries = []
         skipped = []
-        for x, y, w, h, text in lines:
-            raw = (text or "").strip()
+        for row in merged_lines:
+            raw = (row.get("text") or "").strip()
             if not raw:
                 continue
             norm = normalize_line(raw)
-            amount = extract_amount_from_text(norm)
-            amount = clean_amount_display(amount) if amount else None
+            amount_info = self._select_rechnungen_amount_candidate(row, norm)
+            amount = amount_info.get("display") if amount_info else None
             date_match = DATE_RE.search(norm) if norm else None
             if not amount or not date_match:
                 if amount or date_match:
@@ -3679,17 +4425,29 @@ class RDPApp(tk.Tk):
                 date_obj = None
             invoice_match = INVOICE_RE.search(norm)
             invoice = invoice_match.group(0) if invoice_match else ""
+            label_info = self._extract_rechnungen_label_info(row, norm)
+            label_display = label_info.get("display", "")
+            label_normalized = label_info.get("normalized", "")
             entry = {
                 "raw": raw,
                 "norm": norm,
-                "amount": amount,
+                "amount": clean_amount_display(amount) if amount else amount,
+                "amount_box": amount_info.get("box") if amount_info else None,
+                "amount_value": amount_info.get("value") if amount_info else None,
+                "amount_source": amount_info.get("source") if amount_info else "",
                 "date": date_text,
                 "date_obj": date_obj,
                 "invoice": invoice,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
+                "label": label_display,
+                "label_normalized": label_normalized,
+                "label_is_gg": (
+                    is_gg_label(label_normalized) or is_gg_label(label_display)
+                ),
+                "label_box": label_info.get("box"),
+                "x": row.get("x", 0),
+                "y": row.get("y", 0),
+                "w": row.get("w", 0),
+                "h": row.get("h", 0),
             }
             entries.append(entry)
         entries.sort(
@@ -3699,11 +4457,90 @@ class RDPApp(tk.Tk):
                 e.get("x", 0),
             )
         )
-        for entry in entries:
-            self.log_print(f"{prefix}Rechnungen candidate: {entry['norm']}")
+        for idx, entry in enumerate(entries, 1):
+            detail = self._format_rechnungen_detail(entry)
+            label_display = entry.get("label") or entry.get("label_normalized") or "-"
+            amount_txt = entry.get("amount", "") or "(no amount)"
+            bounds = entry.get("amount_box")
+            bounds_txt = (
+                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                else ""
+            )
+            self.log_print(
+                f"{prefix}Row {idx}: {amount_txt}{detail} | Label: {label_display}{bounds_txt}"
+            )
         for norm, reason in skipped[:6]:
-            self.log_print(f"{prefix}Skipped Rechnungen line '{norm}' ({reason}).")
+            self.log_print(f"{prefix}Skipped Rechnungen row '{norm}' ({reason}).")
         return entries
+
+    def _is_gg_entry(self, entry):
+        if not entry:
+            return False
+        if entry.get("label_is_gg"):
+            return True
+
+        label_norm = entry.get("label_normalized") or ""
+        if is_gg_label(label_norm):
+            return True
+
+        label_display = entry.get("label") or ""
+        if is_gg_label(label_display):
+            return True
+
+        raw_text = entry.get("raw") or ""
+        if raw_text:
+            tokens = re.split(r"[^A-Z0-9]+", normalize_line(raw_text).upper())
+            for token in tokens:
+                if not token or len(token) < 2:
+                    continue
+                if not re.search(r"[A-Z]", token):
+                    continue
+                if is_gg_label(token):
+                    return True
+
+        return False
+
+    def _extract_rechnungen_gg_entries(self, prefix=""):
+        lines = self._capture_named_region_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
+        )
+        if not lines:
+            return []
+
+        entries = self._parse_rechnungen_entries(lines, prefix=prefix)
+        gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
+
+        log_lines = []
+        if gg_entries:
+            log_lines.append(
+                f"{prefix}Detected {len(gg_entries)} GG transaction(s)."
+            )
+        else:
+            log_lines.append(f"{prefix}No GG transactions detected.")
+
+        for idx, entry in enumerate(gg_entries, 1):
+            amount = entry.get("amount", "") or "(no amount)"
+            detail = self._format_rechnungen_detail(entry)
+            label_display = (
+                entry.get("label")
+                or entry.get("label_normalized")
+                or "GG"
+            )
+            bounds = entry.get("amount_box")
+            bounds_txt = (
+                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                else ""
+            )
+            log_lines.append(
+                f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
+            )
+
+        for line in log_lines:
+            self.log_print(line)
+
+        return gg_entries
 
     def _summarize_rechnungen_entries(self, entries):
         def _copy(entry):
@@ -3784,6 +4621,21 @@ class RDPApp(tk.Tk):
         if not parts:
             return ""
         return f" ({' | '.join(parts)})"
+
+    def _build_gg_summary_line(self, aktenzeichen, entries):
+        label = aktenzeichen or "(unbekannt)"
+        if not entries:
+            return f"{label}: (no GG)"
+        summary_parts = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            amount = entry.get("amount") or "(no amount)"
+            detail = self._format_rechnungen_detail(entry)
+            summary_parts.append(f"{amount}{detail}")
+        if not summary_parts:
+            return f"{label}: (no GG)"
+        return f"{label}: {'; '.join(summary_parts)}"
 
     def _log_rechnungen_summary(self, prefix, summary):
         if not summary:
@@ -4757,7 +5609,78 @@ class RDPApp(tk.Tk):
             self.log_print("ERROR during Streitwert test: " + repr(e))
 
     # ---------- Utilities ----------
-    def show_preview(self, img: Image.Image):
+    def _prepare_preview_wait(self):
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt:
+            evt.clear()
+        last = getattr(self, "_preview_last_token", 0)
+        target = getattr(self, "_preview_target_token", 0)
+        token = max(last, target) + 1
+        self._preview_target_token = token
+        return token
+
+    def _signal_preview_ready(self, wait_token=None):
+        last = getattr(self, "_preview_last_token", 0)
+        target = getattr(self, "_preview_target_token", 0)
+        if wait_token is None:
+            wait_token = max(last + 1, target)
+        else:
+            wait_token = max(wait_token, last)
+        self._preview_last_token = wait_token
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt:
+            evt.set()
+
+    def _wait_for_preview_ready(self, timeout=1.5):
+        target = getattr(self, "_preview_target_token", 0)
+        if target <= 0:
+            if timeout and timeout > 0:
+                time.sleep(min(timeout, 0.1))
+            return False
+
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt is None:
+            deadline = None if timeout is None else (time.time() + max(0.0, float(timeout)))
+            while True:
+                if getattr(self, "_preview_last_token", 0) >= target:
+                    return True
+                if deadline is not None and time.time() >= deadline:
+                    return False
+                time.sleep(0.05)
+        deadline = None if timeout is None else (time.time() + max(0.0, float(timeout)))
+        while True:
+            if getattr(self, "_preview_last_token", 0) >= target:
+                return True
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                wait_time = min(0.25, remaining)
+            else:
+                wait_time = 0.25
+            try:
+                evt.wait(wait_time)
+            except Exception:
+                return getattr(self, "_preview_last_token", 0) >= target
+        return getattr(self, "_preview_last_token", 0) >= target
+
+    def clear_preview(self):
+        try:
+            if hasattr(self, "img_label"):
+                self.img_label.configure(image="")
+                try:
+                    self.img_label.update_idletasks()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.ocr_preview_imgtk = None
+        self._signal_preview_ready()
+
+    def show_preview(self, img: Image.Image, wait_token=None):
+        if img is None:
+            self._signal_preview_ready(wait_token=wait_token)
+            return
         try:
             w, h = img.size
             if w < 1 or h < 1:
@@ -4769,11 +5692,17 @@ class RDPApp(tk.Tk):
             preview.thumbnail((720, 240))
             self.ocr_preview_imgtk = ImageTk.PhotoImage(preview)
             self.img_label.configure(image=self.ocr_preview_imgtk)
+            try:
+                self.img_label.update_idletasks()
+            except Exception:
+                pass
         except Exception as e:
             try:
                 self.log_print(f"[Preview] display failed: {e}")
             except Exception:
                 pass
+        finally:
+            self._signal_preview_ready(wait_token=wait_token)
 
     # ---------- Live preview (cursor tracking) ----------
     def toggle_live_preview(self):
@@ -4972,11 +5901,30 @@ class RDPApp(tk.Tk):
         self.simple_log.configure(state="disabled")
         self.update_idletasks()
 
+    def _render_simple_log_lines(self, lines):
+        if not hasattr(self, "simple_log"):
+            return
+        self.simple_log.configure(state="normal")
+        self.simple_log.delete("1.0", tk.END)
+        for line in lines or []:
+            if line is None:
+                continue
+            self.simple_log.insert(tk.END, str(line) + "\n")
+        self.simple_log.configure(state="disabled")
+        self.simple_log.see(tk.END)
+        self.update_idletasks()
+
     def _should_skip_manual_waits(self):
-        try:
-            return bool(self.skip_waits_var.get())
-        except Exception:
-            return False
+        for attr in ("skip_waits_var", "rechnungen_skip_waits_var"):
+            var = getattr(self, attr, None)
+            if var is None:
+                continue
+            try:
+                if bool(var.get()):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def pull_form_into_cfg(self):
         self.cfg["rdp_title_regex"] = self.rdp_var.get().strip()
@@ -5061,6 +6009,33 @@ class RDPApp(tk.Tk):
                 self.rechnungen_only_csv_var.get().strip()
                 or "rechnungen_only_results.csv"
             )
+        if hasattr(self, "rechnungen_gg_csv_var"):
+            self.cfg["rechnungen_gg_results_csv"] = (
+                self.rechnungen_gg_csv_var.get().strip()
+                or "rechnungen_gg_results.csv"
+            )
+        if hasattr(self, "rechnungen_search_wait_var"):
+            try:
+                self.cfg["rechnungen_search_wait"] = float(
+                    self.rechnungen_search_wait_var.get() or "1.2"
+                )
+            except Exception:
+                self.cfg["rechnungen_search_wait"] = DEFAULTS.get(
+                    "rechnungen_search_wait", 1.2
+                )
+        if hasattr(self, "rechnungen_region_wait_var"):
+            try:
+                self.cfg["rechnungen_region_wait"] = float(
+                    self.rechnungen_region_wait_var.get() or "0.0"
+                )
+            except Exception:
+                self.cfg["rechnungen_region_wait"] = DEFAULTS.get(
+                    "rechnungen_region_wait", 0.0
+                )
+        if hasattr(self, "rechnungen_skip_waits_var"):
+            self.cfg["rechnungen_overlay_skip_waits"] = bool(
+                self.rechnungen_skip_waits_var.get()
+            )
         if hasattr(self, "log_dir_var"):
             log_dir = (self.log_dir_var.get() or "").strip()
             self.cfg["log_folder"] = log_dir or LOG_DIR
@@ -5141,6 +6116,29 @@ class RDPApp(tk.Tk):
                         "rechnungen_only_results_csv",
                         "rechnungen_only_results.csv",
                     )
+                )
+            if hasattr(self, "rechnungen_gg_csv_var"):
+                self.rechnungen_gg_csv_var.set(
+                    self.cfg.get(
+                        "rechnungen_gg_results_csv",
+                        "rechnungen_gg_results.csv",
+                    )
+                )
+            if hasattr(self, "rechnungen_search_wait_var"):
+                wait_val = self.cfg.get(
+                    "rechnungen_search_wait",
+                    self.cfg.get("post_search_wait", 1.2),
+                )
+                self.rechnungen_search_wait_var.set(str(wait_val))
+            if hasattr(self, "rechnungen_region_wait_var"):
+                region_wait = self.cfg.get(
+                    "rechnungen_region_wait",
+                    DEFAULTS.get("rechnungen_region_wait", 0.0),
+                )
+                self.rechnungen_region_wait_var.set(str(region_wait))
+            if hasattr(self, "rechnungen_skip_waits_var"):
+                self.rechnungen_skip_waits_var.set(
+                    self.cfg.get("rechnungen_overlay_skip_waits", False)
                 )
             if hasattr(self, "log_dir_var"):
                 self.log_dir_var.set(self.cfg.get("log_folder", LOG_DIR))
@@ -5227,6 +6225,18 @@ class RDPApp(tk.Tk):
                     )
                 else:
                     self.rechnungen_region_var.set("")
+            if hasattr(self, "rechnungen_gg_region_var"):
+                gg_box = self.cfg.get("rechnungen_gg_region")
+                if (
+                    isinstance(gg_box, (list, tuple))
+                    and len(gg_box) == 4
+                    and all(isinstance(v, (int, float)) for v in gg_box)
+                ):
+                    self.rechnungen_gg_region_var.set(
+                        f"{gg_box[0]:.3f}, {gg_box[1]:.3f}, {gg_box[2]:.3f}, {gg_box[3]:.3f}"
+                    )
+                else:
+                    self.rechnungen_gg_region_var.set("")
 
             # Profiles UI
             self.profile_names = [
@@ -5269,8 +6279,19 @@ class RDPApp(tk.Tk):
         if not bad:
             return False
         toks = [b.strip().lower() for b in bad.split(";") if b.strip()]
-        s = (line or "").strip().lower()
-        return any(s.startswith(tok) for tok in toks)
+        if not toks:
+            return False
+        line_raw = (line or "").strip()
+        line_lower = line_raw.lower()
+        line_norm = normalize_line_soft(line_raw).lower()
+
+        for tok in toks:
+            if not tok:
+                continue
+            tok_norm = normalize_line_soft(tok).lower()
+            if line_lower.startswith(tok) or line_norm.startswith(tok_norm):
+                return True
+        return False
 
     def _click_file_search_and_type_kfb(self):
         """Click into fees_file_search_region and type the token (once)."""
@@ -5318,7 +6339,125 @@ class RDPApp(tk.Tk):
         else:
             time.sleep(0.6)  # tiny safety fallback
 
-    def _fees_iter_click_pages(self, max_clicks=None):
+    def _fees_analyze_seiten_region(
+        self, x0, y0, W, H, max_clicks=None, img=None, lang=None
+    ):
+        """
+        Inspect the configured Seiten strip and return:
+          - preview image (for reuse by caller)
+          - compact OCR summary text (bottom digits strip)
+          - detected page-label sequence (e.g. "1 2 3 4")
+          - click positions derived from the page labels
+        """
+
+        result = {
+            "img": None,
+            "token_summary": "",
+            "digit_summary": "",
+            "positions": [],
+        }
+
+        if W <= 0 or H <= 0:
+            return result
+
+        if lang is None:
+            try:
+                lang = self.lang_var.get().strip() or "deu+eng"
+            except Exception:
+                lang = "deu+eng"
+
+        try:
+            preview = img or self._grab_region_color(
+                x0, y0, W, H, upscale_x=self.upscale_var.get()
+            )
+        except Exception:
+            return result
+
+        result["img"] = preview
+
+        if preview.width < 2 or preview.height < 2:
+            return result
+
+        band_top = int(preview.height * 0.55)
+        band = self._safe_crop(preview, (0, band_top, preview.width, preview.height))
+        if band.width < 2 or band.height < 2:
+            return result
+
+        scale = 3
+        proc = band.resize((band.width * scale, band.height * scale), Image.LANCZOS)
+        proc = ImageOps.autocontrast(ImageOps.grayscale(proc))
+
+        try:
+            df = do_ocr_data(proc, lang=lang, psm=6)
+        except Exception:
+            df = None
+
+        if df is None or "text" not in df.columns:
+            return result
+
+        texts = []
+        digits = []
+        for row in df.itertuples():
+            text = str(getattr(row, "text", "")).strip()
+            if not text:
+                continue
+
+            left = getattr(row, "left", 0)
+            top = getattr(row, "top", 0)
+            width = getattr(row, "width", 0)
+            height = getattr(row, "height", 0)
+
+            if pd.isna(left):
+                left = 0
+            if pd.isna(top):
+                top = 0
+            if pd.isna(width) or width <= 0:
+                width = 1
+            if pd.isna(height) or height <= 0:
+                height = 1
+
+            # Project coordinates back to the preview (pre-scale, pre-crop)
+            left = float(left) / scale
+            top = float(top) / scale + band_top
+            width = float(width) / scale
+            height = float(height) / scale
+
+            texts.append(text)
+
+            if re.fullmatch(r"\d+", text):
+                center_x = left + width / 2.0
+                center_y = top + height / 2.0
+                digits.append((text, center_x, center_y, height))
+
+        if texts:
+            summary = " | ".join(texts)
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
+            result["token_summary"] = summary
+
+        if not digits:
+            return result
+
+        digits.sort(key=lambda item: item[1])
+        page_labels = []
+        positions = []
+        limit = max_clicks or len(digits)
+
+        for idx, (label, cx, cy, h) in enumerate(digits):
+            if idx >= limit:
+                break
+            abs_x = int(round(x0 + cx))
+            baseline = y0 + cy
+            target_y = baseline - h * 2.0
+            target_y = max(y0 + 5, min(y0 + H - 5, target_y))
+            positions.append((idx + 1, abs_x, int(round(target_y))))
+            page_labels.append(label)
+
+        result["digit_summary"] = " ".join(page_labels)
+        result["positions"] = positions
+        return result
+
+    def _fees_iter_click_pages(self, max_clicks=None, return_positions=False):
         """Click across the Seiten thumbnails from left to right."""
         max_clicks = (
             int(self.cfg.get("fees_pages_max_clicks", 12))
@@ -5336,15 +6475,25 @@ class RDPApp(tk.Tk):
             self.log_print("[Fees] Seiten region not configured.")
             return
 
-        # click N equally spaced thumbs
-        step = max(1, W // max(1, max_clicks))
-        for i in range(max_clicks):
-            x = x0 + step // 2 + i * step
-            y = y0 + H // 2
+        analysis = self._fees_analyze_seiten_region(x0, y0, W, H, max_clicks=max_clicks)
+        positions = analysis.get("positions") or []
+
+        if not positions:
+            # Fallback to evenly spaced clicks if OCR failed to find page labels
+            step = max(1, W // max(1, max_clicks))
+            positions = [
+                (i + 1, x0 + step // 2 + i * step, y0 + H // 2)
+                for i in range(max_clicks)
+            ]
+
+        for idx, x, y in positions:
             pyautogui.click(x, y)
             time.sleep(0.15)
             self._fees_overlay_wait("pdf")
-            yield i + 1
+            if return_positions:
+                yield (idx, x, y)
+            else:
+                yield idx
 
     def _is_pdf_open(self):
         """
@@ -5403,7 +6552,8 @@ class RDPApp(tk.Tk):
         if not self._click_doclist_row(row_idx):  # use your existing helper
             self.log_print(f"{prefix}Cannot click row {row_idx}.")
             return None
-        self._click_view_button()  # your Streitwert view button logic
+        if not self._click_view_button(prefix=prefix):
+            return None
         self._fees_overlay_wait("pdf")
 
         # 2) Click through pages to find amount
@@ -5419,20 +6569,47 @@ class RDPApp(tk.Tk):
         self._fees_overlay_wait("doclist")
         return amount
 
+    def _fees_is_kfb_line(self, text: str) -> bool:
+        if not text:
+            return False
+        if self._KFB_RE.search(text):
+            return True
+        norm = normalize_line_soft(text).lower()
+        if not norm:
+            return False
+        if self._KFB_WORD_RE.search(norm):
+            return True
+        compact = re.sub(r"[^a-zß]", "", norm)
+        return compact.startswith("kostenfestsetzungsbeschl")
+
     def _fees_collect_kfb_rows(self):
         """Return list of (row_index, row_text) that look like KFB and not skipped by bad prefixes."""
         rows_with_boxes = self._ocr_doclist_rows_boxes()
         kfb = []
-        for i, (line, box) in enumerate(rows_with_boxes):
+        for i, (line, _) in enumerate(rows_with_boxes):
             s = (line or "").strip()
             if not s:
                 continue
             if self._fees_should_skip(s):
                 continue
-            if self._KFB_RE.search(s):
+            if self._fees_is_kfb_line(s):
                 kfb.append((i, s))
-                self.log_print(f"[Fees] Found KFB at row {i}: {s} (box: {box})")
         return kfb
+
+    def edit_fees_bad_prefixes(self):
+        """Prompt the user to edit the semicolon-separated bad prefixes list."""
+        try:
+            current = (self.fees_bad_var.get() or "").strip()
+        except Exception:
+            current = ""
+        value = simpledialog.askstring(
+            "Fees Bad Prefixes",
+            "Prefixes to skip (separate with semicolons):",
+            initialvalue=current,
+            parent=self,
+        )
+        if value is not None:
+            self.fees_bad_var.set(value.strip())
 
     def pick_fees_file_search_region(self):
         """Two-click calibration for the KFB search text region."""
@@ -5481,6 +6658,7 @@ class RDPApp(tk.Tk):
         if not kfb_rows:
             self.log_print(f"{prefix}No KFB entries found.")
             return
+        self.log_print(f"{prefix}Found {len(kfb_rows)} KFB entr{'y' if len(kfb_rows)==1 else 'ies'}.")
 
         # Open first N, extract
         N = min(inst, len(kfb_rows))
@@ -5489,9 +6667,10 @@ class RDPApp(tk.Tk):
             row_idx, line = kfb_rows[j]
             self.log_print(f"{prefix}Opening KFB {j+1}/{N}: row {row_idx} → {line}")
             amt = self._fees_open_and_extract_one(row_idx, prefix=prefix)
-            self.log_print(
-                f"{prefix}Amount{' (found)' if amt else ' (not found)'}: {amt}"
-            )
+            if amt:
+                self.log_print(f"{prefix}Amount: {amt}")
+            else:
+                self.log_print(f"{prefix}Amount not found.")
             amounts[j] = amt
 
         # Build CSV row
@@ -5547,9 +6726,81 @@ class RDPApp(tk.Tk):
             self._fees_overlay_wait("doclist")
             kfb_rows = self._fees_collect_kfb_rows()
             if kfb_rows:
+                self.log_print(
+                    f"{prefix}Found {len(kfb_rows)} KFB entr{'y' if len(kfb_rows)==1 else 'ies'} for test."
+                )
                 amount = self._fees_open_and_extract_one(kfb_rows[0][0], prefix=prefix)
 
         self.log_print(f"{prefix}Amount on some page: {amount or '(none found)'}")
+
+    def test_fees_seiten_clicks(self):
+        prefix = "[Fees Seiten Test] "
+        try:
+            self.apply_paths_to_tesseract()
+        except Exception:
+            pass
+
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                self.log_print(f"{prefix}No RDP connection.")
+                return
+
+        if not self._has("fees_seiten_region"):
+            self.log_print(f"{prefix}Seiten region not configured.")
+            return
+
+        try:
+            x, y, w, h = rel_to_abs(self.current_rect, self._get("fees_seiten_region"))
+        except Exception:
+            self.log_print(f"{prefix}Seiten region not configured.")
+            return
+
+        img = None
+        try:
+            img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
+            self.show_preview(img)
+        except Exception:
+            self.log_print(f"{prefix}Preview unavailable.")
+
+        lang = None
+        try:
+            lang = self.lang_var.get().strip() or "deu+eng"
+        except Exception:
+            lang = "deu+eng"
+
+        analysis = self._fees_analyze_seiten_region(
+            x, y, w, h, max_clicks=6, img=img, lang=lang
+        )
+
+        summary = analysis.get("token_summary") or ""
+        self.log_print(f"{prefix}OCR text: {summary or '(none)'}")
+
+        digits_summary = analysis.get("digit_summary") or ""
+        if digits_summary:
+            self.log_print(f"{prefix}Detected pages: {digits_summary}")
+        else:
+            self.log_print(f"{prefix}Detected pages: (none)")
+
+        positions = analysis.get("positions") or []
+        clicks = 0
+        if positions:
+            for idx, cx, cy in positions:
+                clicks = idx
+                pyautogui.click(cx, cy)
+                time.sleep(0.15)
+                self._fees_overlay_wait("pdf")
+                self.log_print(f"{prefix}Click {idx} at ({cx}, {cy}).")
+        else:
+            iterator = self._fees_iter_click_pages(max_clicks=6, return_positions=True)
+            if iterator is None:
+                return
+            for idx, cx, cy in iterator:
+                clicks = idx
+                self.log_print(f"{prefix}Click {idx} at ({cx}, {cy}).")
+
+        if clicks == 0:
+            self.log_print(f"{prefix}No clicks executed.")
 
     def save_amount_profile(self):
         name = (self.new_prof_name_var.get() or "").strip()
