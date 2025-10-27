@@ -3344,6 +3344,7 @@ class RDPApp(tk.Tk):
                     return
             Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
 
+            self.clear_preview()
             self.clear_simple_log()
             entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
             if not entries:
@@ -3480,6 +3481,7 @@ class RDPApp(tk.Tk):
                 return
 
             if queries:
+                self.clear_preview()
                 self.clear_simple_log()
             simple_lines = []
 
@@ -4083,7 +4085,9 @@ class RDPApp(tk.Tk):
         self.log_print(f"{prefix}Waiting {wait_seconds:.2f}s for {name} region.")
         time.sleep(wait_seconds)
 
-    def _capture_named_region_preview_and_lines(self, cfg_key, prefix="", label=""):
+    def _capture_named_region_preview_and_lines(
+        self, cfg_key, prefix="", label="", show_preview=False
+    ):
         if not self.current_rect:
             self.log_print(
                 f"{prefix}No active RDP rectangle. Connect before capturing."
@@ -4099,6 +4103,11 @@ class RDPApp(tk.Tk):
             x, y, w, h = rel_to_abs(self.current_rect, self._get(cfg_key))
             scale = max(1, int(self.upscale_var.get() or 3))
             img = self._grab_region_color(x, y, w, h, upscale_x=scale)
+            if show_preview:
+                try:
+                    self.show_preview(img)
+                except Exception:
+                    pass
         except Exception as exc:
             name = label or cfg_key.replace("_", " ").title()
             self.log_print(f"{prefix}Failed to capture {name} region: {exc}")
@@ -4138,9 +4147,11 @@ class RDPApp(tk.Tk):
         self.log_print(f"{prefix}{name} OCR lines: {len(lines)}.")
         return img, lines, scale
 
-    def _capture_named_region_lines(self, cfg_key, prefix="", label=""):
+    def _capture_named_region_lines(
+        self, cfg_key, prefix="", label="", show_preview=False
+    ):
         img, lines, _scale = self._capture_named_region_preview_and_lines(
-            cfg_key, prefix=prefix, label=label
+            cfg_key, prefix=prefix, label=label, show_preview=show_preview
         )
         return lines
 
@@ -4492,7 +4503,7 @@ class RDPApp(tk.Tk):
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
         _img, lines, _scale = self._capture_named_region_preview_and_lines(
-            "rechnungen_gg_region", prefix=prefix, label="GG"
+            "rechnungen_gg_region", prefix=prefix, label="GG", show_preview=True
         )
         if not lines:
             return []
@@ -5652,6 +5663,19 @@ class RDPApp(tk.Tk):
             except Exception:
                 return getattr(self, "_preview_last_token", 0) >= target
         return getattr(self, "_preview_last_token", 0) >= target
+
+    def clear_preview(self):
+        try:
+            if hasattr(self, "img_label"):
+                self.img_label.configure(image="")
+                try:
+                    self.img_label.update_idletasks()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.ocr_preview_imgtk = None
+        self._signal_preview_ready()
 
     def show_preview(self, img: Image.Image, wait_token=None):
         if img is None:
