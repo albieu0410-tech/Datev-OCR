@@ -4454,7 +4454,9 @@ class RDPApp(tk.Tk):
         if raw_text:
             tokens = re.split(r"[^A-Z0-9]+", normalize_line(raw_text).upper())
             for token in tokens:
-                if not token:
+                if not token or len(token) < 2:
+                    continue
+                if not re.search(r"[A-Z]", token):
                     continue
                 if is_gg_label(token):
                     return True
