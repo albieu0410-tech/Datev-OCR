@@ -4502,8 +4502,8 @@ class RDPApp(tk.Tk):
         return False
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
-        _img, lines, _scale = self._capture_named_region_preview_and_lines(
-            "rechnungen_gg_region", prefix=prefix, label="GG", show_preview=True
+        lines = self._capture_named_region_lines(
+            "rechnungen_gg_region", prefix=prefix, label="GG"
         )
         if not lines:
             return []
