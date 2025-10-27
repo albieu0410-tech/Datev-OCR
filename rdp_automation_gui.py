@@ -1793,6 +1793,7 @@ class RDPApp(tk.Tk):
         self.live_preview_imgtk = None
         self.live_preview_running = False
         self._ocr_log_paths = {}
+        self._preview_ready_event = threading.Event()
 
         # Initialize MSS in the main thread
         get_mss()
@@ -3343,6 +3344,7 @@ class RDPApp(tk.Tk):
 
             self.clear_simple_log()
             entries = self._extract_rechnungen_gg_entries(prefix="[GG Test] ")
+            self._wait_for_preview_ready()
             if not entries:
                 self.log_print("[GG Test] No GG transactions detected.")
                 self.simple_log_print("GG Test: no GG transactions detected.")
@@ -3520,6 +3522,7 @@ class RDPApp(tk.Tk):
                     )
 
                     entries = self._extract_rechnungen_gg_entries(prefix=prefix)
+                    self._wait_for_preview_ready()
                     if not entries:
                         self.log_print(f"{prefix}No GG transactions detected.")
                         summary_line = self._build_gg_summary_line(aktenzeichen, [])
@@ -4015,7 +4018,9 @@ class RDPApp(tk.Tk):
                         try:
                             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
                             clahe_arr = clahe.apply(arr)
-                            clahe_img = Image.fromarray(clahe_arr, mode="L")
+                            clahe_img = Image.fromarray(clahe_arr)
+                            if clahe_img.mode != "L":
+                                clahe_img = clahe_img.convert("L")
                             variants.append(ImageOps.autocontrast(clahe_img))
                         except Exception:
                             pass
@@ -4026,7 +4031,9 @@ class RDPApp(tk.Tk):
                     else:
                         threshold = np.percentile(arr, 60)
                         thresh = (arr <= threshold).astype(np.uint8) * 255
-                    thr_img = Image.fromarray(thresh.astype(np.uint8), mode="L")
+                    thr_img = Image.fromarray(thresh.astype(np.uint8))
+                    if thr_img.mode != "L":
+                        thr_img = thr_img.convert("L")
                     try:
                         if ImageStat.Stat(thr_img).mean[0] > 127:
                             thr_img = ImageOps.invert(thr_img)
@@ -4528,34 +4535,57 @@ class RDPApp(tk.Tk):
         return False
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
-        img, lines, scale = self._capture_named_region_preview_and_lines(
-            "rechnungen_gg_region", prefix=prefix, label="GG"
-        )
-        if img is None and not lines:
-            return []
-        entries = self._parse_rechnungen_entries(lines, prefix=prefix)
-        gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
-        if gg_entries:
-            self.log_print(f"{prefix}Detected {len(gg_entries)} GG transaction(s).")
-        else:
-            self.log_print(f"{prefix}No GG transactions detected.")
-        for idx, entry in enumerate(gg_entries, 1):
-            amount = entry.get("amount", "") or "(no amount)"
-            detail = self._format_rechnungen_detail(entry)
-            label_display = entry.get("label") or entry.get("label_normalized") or "GG"
-            bounds = entry.get("amount_box")
-            bounds_txt = (
-                f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
-                if isinstance(bounds, (list, tuple)) and len(bounds) == 4
-                else ""
+        self._prepare_preview_wait()
+        try:
+            img, lines, scale = self._capture_named_region_preview_and_lines(
+                "rechnungen_gg_region", prefix=prefix, label="GG"
             )
-            self.log_print(
-                f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
-            )
-        preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
-        if preview is not None:
-            self.show_preview(preview)
-        return gg_entries
+            if img is None and not lines:
+                self._signal_preview_ready()
+                return []
+
+            entries = self._parse_rechnungen_entries(lines, prefix=prefix)
+            gg_entries = [entry for entry in entries if self._is_gg_entry(entry)]
+
+            log_lines = []
+            if gg_entries:
+                log_lines.append(
+                    f"{prefix}Detected {len(gg_entries)} GG transaction(s)."
+                )
+            else:
+                log_lines.append(f"{prefix}No GG transactions detected.")
+
+            for idx, entry in enumerate(gg_entries, 1):
+                amount = entry.get("amount", "") or "(no amount)"
+                detail = self._format_rechnungen_detail(entry)
+                label_display = (
+                    entry.get("label")
+                    or entry.get("label_normalized")
+                    or "GG"
+                )
+                bounds = entry.get("amount_box")
+                bounds_txt = (
+                    f" | Bounds: ({bounds[0]}, {bounds[1]}, {bounds[2]}, {bounds[3]})"
+                    if isinstance(bounds, (list, tuple)) and len(bounds) == 4
+                    else ""
+                )
+                log_lines.append(
+                    f"{prefix}GG #{idx}: {amount}{detail} | Label: {label_display}{bounds_txt}"
+                )
+
+            preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
+            if preview is not None:
+                self.show_preview(preview)
+            else:
+                self._signal_preview_ready()
+
+            for line in log_lines:
+                self.log_print(line)
+
+            return gg_entries
+        except Exception:
+            self._signal_preview_ready()
+            raise
 
     def _summarize_rechnungen_entries(self, entries):
         def _copy(entry):
@@ -5624,7 +5654,31 @@ class RDPApp(tk.Tk):
             self.log_print("ERROR during Streitwert test: " + repr(e))
 
     # ---------- Utilities ----------
+    def _prepare_preview_wait(self):
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt:
+            evt.clear()
+
+    def _signal_preview_ready(self):
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt:
+            evt.set()
+
+    def _wait_for_preview_ready(self, timeout=1.5):
+        evt = getattr(self, "_preview_ready_event", None)
+        if not evt:
+            if timeout and timeout > 0:
+                time.sleep(min(timeout, 0.1))
+            return False
+        try:
+            return evt.wait(max(0.0, float(timeout)))
+        except Exception:
+            return False
+
     def show_preview(self, img: Image.Image):
+        if img is None:
+            self._signal_preview_ready()
+            return
         try:
             w, h = img.size
             if w < 1 or h < 1:
@@ -5636,11 +5690,17 @@ class RDPApp(tk.Tk):
             preview.thumbnail((720, 240))
             self.ocr_preview_imgtk = ImageTk.PhotoImage(preview)
             self.img_label.configure(image=self.ocr_preview_imgtk)
+            try:
+                self.img_label.update_idletasks()
+            except Exception:
+                pass
         except Exception as e:
             try:
                 self.log_print(f"[Preview] display failed: {e}")
             except Exception:
                 pass
+        finally:
+            self._signal_preview_ready()
 
     # ---------- Live preview (cursor tracking) ----------
     def toggle_live_preview(self):
