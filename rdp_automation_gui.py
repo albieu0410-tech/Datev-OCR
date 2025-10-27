@@ -1794,6 +1794,8 @@ class RDPApp(tk.Tk):
         self.live_preview_running = False
         self._ocr_log_paths = {}
         self._preview_ready_event = threading.Event()
+        self._preview_last_token = 0
+        self._preview_target_token = 0
 
         # Initialize MSS in the main thread
         get_mss()
@@ -3522,7 +3524,10 @@ class RDPApp(tk.Tk):
                     )
 
                     entries = self._extract_rechnungen_gg_entries(prefix=prefix)
-                    self._wait_for_preview_ready()
+                    if not self._wait_for_preview_ready(timeout=6.0):
+                        self.log_print(
+                            f"{prefix}Preview generation timed out; continuing with latest data."
+                        )
                     if not entries:
                         self.log_print(f"{prefix}No GG transactions detected.")
                         summary_line = self._build_gg_summary_line(aktenzeichen, [])
@@ -4535,13 +4540,13 @@ class RDPApp(tk.Tk):
         return False
 
     def _extract_rechnungen_gg_entries(self, prefix=""):
-        self._prepare_preview_wait()
+        wait_token = self._prepare_preview_wait()
         try:
             img, lines, scale = self._capture_named_region_preview_and_lines(
                 "rechnungen_gg_region", prefix=prefix, label="GG"
             )
             if img is None and not lines:
-                self._signal_preview_ready()
+                self._signal_preview_ready(wait_token=wait_token)
                 return []
 
             entries = self._parse_rechnungen_entries(lines, prefix=prefix)
@@ -4575,16 +4580,16 @@ class RDPApp(tk.Tk):
 
             preview = self._annotate_rechnungen_preview(img, gg_entries, scale)
             if preview is not None:
-                self.show_preview(preview)
+                self.show_preview(preview, wait_token=wait_token)
             else:
-                self._signal_preview_ready()
+                self._signal_preview_ready(wait_token=wait_token)
 
             for line in log_lines:
                 self.log_print(line)
 
             return gg_entries
         except Exception:
-            self._signal_preview_ready()
+            self._signal_preview_ready(wait_token=wait_token)
             raise
 
     def _summarize_rechnungen_entries(self, entries):
@@ -5658,26 +5663,60 @@ class RDPApp(tk.Tk):
         evt = getattr(self, "_preview_ready_event", None)
         if evt:
             evt.clear()
+        last = getattr(self, "_preview_last_token", 0)
+        target = getattr(self, "_preview_target_token", 0)
+        token = max(last, target) + 1
+        self._preview_target_token = token
+        return token
 
-    def _signal_preview_ready(self):
+    def _signal_preview_ready(self, wait_token=None):
+        last = getattr(self, "_preview_last_token", 0)
+        target = getattr(self, "_preview_target_token", 0)
+        if wait_token is None:
+            wait_token = max(last + 1, target)
+        else:
+            wait_token = max(wait_token, last)
+        self._preview_last_token = wait_token
         evt = getattr(self, "_preview_ready_event", None)
         if evt:
             evt.set()
 
     def _wait_for_preview_ready(self, timeout=1.5):
-        evt = getattr(self, "_preview_ready_event", None)
-        if not evt:
+        target = getattr(self, "_preview_target_token", 0)
+        if target <= 0:
             if timeout and timeout > 0:
                 time.sleep(min(timeout, 0.1))
             return False
-        try:
-            return evt.wait(max(0.0, float(timeout)))
-        except Exception:
-            return False
 
-    def show_preview(self, img: Image.Image):
+        evt = getattr(self, "_preview_ready_event", None)
+        if evt is None:
+            deadline = None if timeout is None else (time.time() + max(0.0, float(timeout)))
+            while True:
+                if getattr(self, "_preview_last_token", 0) >= target:
+                    return True
+                if deadline is not None and time.time() >= deadline:
+                    return False
+                time.sleep(0.05)
+        deadline = None if timeout is None else (time.time() + max(0.0, float(timeout)))
+        while True:
+            if getattr(self, "_preview_last_token", 0) >= target:
+                return True
+            if deadline is not None:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                wait_time = min(0.25, remaining)
+            else:
+                wait_time = 0.25
+            try:
+                evt.wait(wait_time)
+            except Exception:
+                return getattr(self, "_preview_last_token", 0) >= target
+        return getattr(self, "_preview_last_token", 0) >= target
+
+    def show_preview(self, img: Image.Image, wait_token=None):
         if img is None:
-            self._signal_preview_ready()
+            self._signal_preview_ready(wait_token=wait_token)
             return
         try:
             w, h = img.size
@@ -5700,7 +5739,7 @@ class RDPApp(tk.Tk):
             except Exception:
                 pass
         finally:
-            self._signal_preview_ready()
+            self._signal_preview_ready(wait_token=wait_token)
 
     # ---------- Live preview (cursor tracking) ----------
     def toggle_live_preview(self):
