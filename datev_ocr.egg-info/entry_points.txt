@@ -1,0 +1,2 @@
+[console_scripts]
+datev-ocr = rdp_automation_gui:main

@@ -1,0 +1,11 @@
+pyproject.toml
+rdp_app.py
+rdp_automation_gui.py
+rdp_config.py
+rdp_helpers.py
+datev_ocr.egg-info/PKG-INFO
+datev_ocr.egg-info/SOURCES.txt
+datev_ocr.egg-info/dependency_links.txt
+datev_ocr.egg-info/entry_points.txt
+datev_ocr.egg-info/requires.txt
+datev_ocr.egg-info/top_level.txt

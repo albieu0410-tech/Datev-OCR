@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datev-ocr"
+version = "0.1.0"
+description = "GUI automation helper for extracting OCR data from DATEV Remote Desktop sessions."
+requires-python = ">=3.10"
+authors = [{ name = "Datev OCR Maintainers" }]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "pillow>=10.0",
+    "pyautogui>=0.9",
+    "pywinauto>=0.6",
+    "pytesseract>=0.3",
+    "mss>=9.0",
+]
+
+[project.optional-dependencies]
+opencv = ["opencv-python>=4.10"]
+dev = ["pytest>=8.2", "ruff>=0.5"]
+
+[project.scripts]
+datev-ocr = "rdp_automation_gui:main"
+
+[tool.setuptools]
+py-modules = [
+    "rdp_app",
+    "rdp_helpers",
+    "rdp_config",
+    "rdp_automation_gui",
+]

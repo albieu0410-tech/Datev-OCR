@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: datev-ocr
+Version: 0.1.0
+Summary: GUI automation helper for extracting OCR data from DATEV Remote Desktop sessions.
+Author: Datev OCR Maintainers
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: pillow>=10.0
+Requires-Dist: pyautogui>=0.9
+Requires-Dist: pywinauto>=0.6
+Requires-Dist: pytesseract>=0.3
+Requires-Dist: mss>=9.0
+Provides-Extra: opencv
+Requires-Dist: opencv-python>=4.10; extra == "opencv"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
