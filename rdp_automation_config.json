@@ -1,7 +1,7 @@
 {
   "fees_search_token": "KFB",
   "fees_bad_prefixes": "SVRAGS;SVR-AGS;Skrags;SV RAGS",
-  "fees_overlay_skip_waits": true,
+  "fees_overlay_skip_waits": false,
   "fees_file_search_region": [
     0.1,
     0.08,
@@ -17,25 +17,25 @@
   "fees_pages_max_clicks": 12,
   "fees_csv_path": "fees_results.csv",
   "rdp_title_regex": ".* - Remote Desktop Connection",
-  "excel_path": "C:/Users/salbahaca/Documents/Automations/Sorting Excel Dates/Datev OCR/Empty Streitwerts.xlsx",
-  "excel_sheet": "Sheet4",
-  "input_column": "aktenzeichen",
+  "excel_path": "C:/Sharepoint/OneDrive - Golden-Tech GmbH/Tasks/Sandra's Tasks/M Cases zur Bearbeitung_updated_291020251347.xlsx",
+  "excel_sheet": "KFB",
+  "input_column": "AZ",
   "results_csv": "rdp_results.csv",
   "tesseract_path": "C:/Users/salbahaca/AppData/Local/Programs/Tesseract-OCR/tesseract.exe",
   "tesseract_lang": "deu+eng",
   "type_delay": 0.02,
   "post_search_wait": 3.5,
   "search_point": [
-    0.19222689075630253,
-    0.1753875968992248
+    0.20745798319327732,
+    0.17732558139534885
   ],
   "result_region": [
-    0.7783613445378151,
-    0.2810077519379845,
-    0.2027310924369748,
-    0.03488372093023256
+    0.8298319327731093,
+    0.19186046511627908,
+    0.15073529411764705,
+    0.06492248062015504
   ],
-  "start_cell": "A4",
+  "start_cell": "A2",
   "max_rows": 0,
   "line_band_px": 40,
   "picked_line_rel_y": null,
@@ -62,32 +62,32 @@
   "active_amount_profile": "Rechnungen",
   "use_amount_profile": false,
   "doclist_region": [
-    0.11817226890756302,
+    0.11869747899159663,
     0.626937984496124,
-    0.8692226890756303,
-    0.311046511627907
+    0.8686974789915967,
+    0.312015503875969
   ],
   "pdf_search_point": [
-    0.5850840336134454,
-    0.6841085271317829
+    0.5740546218487395,
+    0.6831395348837209
   ],
   "pdf_hits_point": [
-    0.026260504201680673,
+    0.026785714285714284,
     0.14437984496124032
   ],
   "pdf_hits_second_point": [
-    0.025735294117647058,
-    0.21996124031007752
+    0.023109243697478993,
+    0.22577519379844962
   ],
   "pdf_hits_third_point": [
-    0.026260504201680673,
-    0.3062015503875969
+    0.02415966386554622,
+    0.29844961240310075
   ],
   "pdf_text_region": [
     0.34086134453781514,
-    0.04941860465116279,
-    0.3707983193277311,
-    0.8187984496124031
+    0.05813953488372093,
+    0.37342436974789917,
+    0.8391472868217055
   ],
   "includes": "Urt,SWB,SW,SWBs,Prot",
   "excludes": "SaM,KLE,Anlage,SaGS,SvM,KLE,KAA,GS,Anhang,BGH, KAA GS, KFB, KAAGS",
@@ -98,30 +98,40 @@
   "pdf_hit_wait": 2.0,
   "pdf_view_extra_wait": 0.0,
   "doc_view_point": [
-    0.2804621848739496,
-    0.686046511627907
+    0.28256302521008403,
+    0.6812015503875969
   ],
   "pdf_close_point": [
-    0.9910714285714286,
-    -0.029069767441860465
+    0.9915966386554622,
+    -0.02422480620155039
   ],
   "streitwert_overlay_skip_waits": true,
   "ignore_top_doc_row": false,
   "rechnungen_region": [
-    0.8130230125523012,
-    0.2274659863945578,
-    0.17468619246861924,
-    0.070578231292517
+    0.8314075630252101,
+    0.18895348837209303,
+    0.1486344537815126,
+    0.07073643410852713
   ],
   "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
   "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+  "rechnungen_gg_region": [
+    0.12605042016806722,
+    0.6734496124031008,
+    0.8571428571428571,
+    0.25872093023255816
+  ],
+  "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
+  "rechnungen_search_wait": 10.0,
+  "rechnungen_region_wait": 9.0,
+  "rechnungen_overlay_skip_waits": false,
   "log_folder": "log",
   "log_extract_results_csv": "streitwert_log_extract.csv",
   "instance_region": [
-    0.5603991596638656,
-    0.23837209302325582,
-    0.13602941176470587,
-    0.016472868217054265
+    0.5598739495798319,
+    0.2180232558139535,
+    0.12867647058823528,
+    0.041666666666666664
   ],
   "instance_row_rel_top": 0.45,
   "pdf_hits_region": [
