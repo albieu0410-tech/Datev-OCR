@@ -1,4 +1,4 @@
-﻿import os, io, json, time, threading, re, unicodedata, sys
+﻿import os, io, json, time, threading, re, unicodedata
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
 import tkinter as tk
@@ -15,23 +15,11 @@ from PIL import (
 )
 import pandas as pd
 import pyautogui
-
-try:  # Pywinauto renamed Desktop helper across releases
-    from pywinauto.desktop import Desktop
-except ImportError:
-    try:
-        from pywinauto.application import Desktop
-    except ImportError:  # older versions exposed it at package root
-        from pywinauto import Desktop
+from pywinauto import Desktop
+from pywinauto.keyboard import send_keys
 from mss import mss
 import pytesseract
 import numpy as np
-
-if sys.platform != "win32":
-    raise RuntimeError(
-        "DATEV automation requires Windows; pywinauto/win32process are only "
-        "available on that platform."
-    )
 
 # Try OpenCV (optional; used for green-row detection; app works without it)
 try:
@@ -41,135 +29,1197 @@ try:
 except Exception:
     _HAS_CV2 = False
 
-try:
-    from chandra.model import InferenceManager
-    import chandra.model.hf as _chandra_hf_module
-    from chandra.model.schema import BatchInputItem
-    from chandra import settings as _chandra_settings
+# ------------------ Defaults & Config ------------------
+LOG_DIR = "log"
 
-    _HAS_CHANDRA = True
-    _CHANDRA_CPU_PATCHED = False
-except Exception:
-    InferenceManager = None
-    BatchInputItem = None
-    _HAS_CHANDRA = False
-    _CHANDRA_CPU_PATCHED = False
 
-def _ensure_chandra_hf_cpu():
-    global _CHANDRA_CPU_PATCHED
-    if not _HAS_CHANDRA or _CHANDRA_CPU_PATCHED:
-        return
+DEFAULTS = {
+    # --- Fees tab defaults ---
+    "fees_search_token": "KFB",  # typed in file-search box (once at start)
+    "fees_bad_prefixes": "SVRAGS;SVR-AGS;Skrags;SV RAGS",  # semicolon-separated
+    "fees_overlay_skip_waits": True,  # behave like Streitwert overlay-only waits
+    "fees_file_search_region": [0.10, 0.08, 0.25, 0.05],  # where we click+type KFB
+    "fees_seiten_region": [0.08, 0.84, 0.84, 0.12],  # thumbnails strip
+    "fees_pages_max_clicks": 12,  # safety upper bound of page clicks
+    "fees_csv_path": "fees_results.csv",  # output
+    "rdp_title_regex": r".* - Remote Desktop Connection",
+    "excel_path": "input.xlsx",
+    "excel_sheet": "Sheet1",
+    "input_column": "query",
+    "results_csv": "rdp_results.csv",
+    "tesseract_path": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    "tesseract_lang": "deu+eng",
+    "type_delay": 0.02,
+    "post_search_wait": 1.2,
+    "search_point": [0.25, 0.10],  # relative x,y within RDP client
+    "result_region": [0.15, 0.20, 0.80, 0.35],  # relative l,t,w,h within RDP client
+    "start_cell": "",  # e.g., "B2"
+    "max_rows": 0,
+    "line_band_px": 40,  # used only for manual-line OCR fallback
+    "picked_line_rel_y": None,
+    "typing_test_text": "TEST123",
+    "line_offset_px": 0,
+    "upscale_x": 4,
+    "color_ocr": True,
+    "auto_green": True,
+    # NEW: full-region parsing (works even when no green row is selected)
+    "use_full_region_parse": True,
+    "keyword": "Honorar",
+    "normalize_ocr": True,
+    # -------- NEW: Amount Region Profiles --------
+    # Each profile is stored relative to "result_region"
+    # { "name": str, "keyword": str, "sub_region": [l, t, w, h] }
+    "amount_profiles": [],  # list of dicts
+    "active_amount_profile": "",  # profile name
+    "use_amount_profile": False,  # if True, restrict OCR to profile sub-region
+    # --- Streitwert workflow (NEW) ---
+    "doclist_region": [0.10, 0.24, 0.78, 0.50],  # list/table area with documents
+    "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
+    "pdf_hits_point": [0.08, 0.32],  # button inside the PDF hits pane
+    "pdf_hits_second_point": [0.08, 0.40],  # optional 2nd PDF result button
+    "pdf_hits_third_point": [0.08, 0.48],  # optional 3rd PDF result button
+    "pdf_text_region": [0.20, 0.18, 0.74, 0.68],  # main page text area
+    "includes": "Urt,SWB,SW",  # rows to include if they contain any of these
+    "excludes": "SaM,KLE",  # rows to skip if they contain any of these
+    "exclude_prefix_k": True,  # also skip rows starting with 'K' (e.g. 'K9 Urteil')
+    "streitwert_term": "Streitwert",  # term to type into PDF search
+    "streitwert_results_csv": "streitwert_results.csv",
+    "doc_open_wait": 1.2,  # wait (s) after opening a doc
+    "pdf_hit_wait": 1.0,  # wait (s) after clicking a search hit
+    "pdf_view_extra_wait": 2.0,  # wait (s) after pressing the PDF results button
+    "doc_view_point": [0.88, 0.12],  # "View" button to open the selected doc
+    "pdf_close_point": [0.97, 0.05],  # close button for the PDF viewer window
+    # --- Akten workflow ---
+    "akten_document_filter_region": [0.0, 0.0, 0.0, 0.0],
+    "akten_search_term": "Aufforderungsschreiben",
+    "akten_ignore_tokens": "",
+    "streitwert_overlay_skip_waits": False,  # rely solely on overlay detection delays
+    "ignore_top_doc_row": False,  # skip the first/topmost Streitwert match
+    # --- Rechnungen workflow (NEW) ---
+    "rechnungen_region": [0.55, 0.30, 0.35, 0.40],
+    "rechnungen_results_csv": "Streitwert_Results_Rechnungen.csv",
+    "rechnungen_only_results_csv": "rechnungen_only_results.csv",
+    "rechnungen_gg_region": [0.55, 0.30, 0.35, 0.40],
+    "rechnungen_gg_results_csv": "rechnungen_gg_results.csv",
+    "rechnungen_search_wait": 1.2,
+    "rechnungen_region_wait": 0.8,
+    "rechnungen_overlay_skip_waits": False,
+    "log_folder": LOG_DIR,
+    "log_extract_results_csv": "streitwert_log_extract.csv",
+    # New: AZ Instanz table detection
+    "instance_region": [0.10, 0.10, 0.30, 0.10],  # (l,t,w,h) relative to RDP window
+    "instance_row_rel_top": 0.45,  # start scanning at 45% from top (below headers)
+}
+CFG_FILE = "rdp_automation_config.json"
+
+STREITWERT_MIN_AMOUNT = Decimal("1000")
+
+FORCED_STREITWERT_EXCLUDES = [
+    ("KAA GS", re.compile(r"\bKAA(?:\s+|-)?GS\b", re.IGNORECASE)),
+    ("KAAGS", re.compile(r"\bKAAGS\b", re.IGNORECASE)),
+    ("KAA", re.compile(r"\bKAA\b", re.IGNORECASE)),
+    ("KFB(vA)", re.compile(r"\bKFB\s*\(vA\)\b", re.IGNORECASE)),
+    ("KFB vA", re.compile(r"\bKFB\s*vA\b", re.IGNORECASE)),
+    ("KFB", re.compile(r"\bKFB\b", re.IGNORECASE)),
+    ("KLE", re.compile(r"\bKLE\b", re.IGNORECASE)),
+    ("GS", re.compile(r"\bGS\b", re.IGNORECASE)),
+]
+
+
+# ------------------ Helpers ------------------
+def ensure_log_dir():
     try:
-        import torch
-    except Exception:
-        return
-    if torch.cuda.is_available():
-        _CHANDRA_CPU_PATCHED = True
-        return
-    try:
-        import chandra.model as _chandra_model_module
-        from qwen_vl_utils import process_vision_info
-        from chandra.model.schema import GenerationResult
-        from transformers import Qwen3VLForConditionalGeneration, Qwen3VLProcessor
-    except Exception:
-        return
-    try:
-        _chandra_settings.__dict__["TORCH_DEVICE"] = "cpu"
-        _chandra_settings.__dict__["TORCH_DTYPE"] = torch.float32
+        os.makedirs(LOG_DIR, exist_ok=True)
     except Exception:
         pass
-    model_ckpt = getattr(_chandra_settings, "MODEL_CHECKPOINT", "datalab-to/chandra")
 
-    def generate_hf_cpu(batch, model, max_output_tokens=None, **kwargs):
-        if max_output_tokens is None:
-            max_output_tokens = getattr(_chandra_settings, "MAX_OUTPUT_TOKENS", 4096)
-        messages = [
-            _chandra_hf_module.process_batch_element(item, model.processor)
-            for item in batch
-        ]
-        text = model.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, _ = process_vision_info(messages)
-        inputs = model.processor(
-            text=text,
-            images=image_inputs,
-            padding=True,
-            return_tensors="pt",
-            padding_side="left",
-        )
-        inputs = inputs.to("cpu")
-        generated_ids = model.generate(**inputs, max_new_tokens=max_output_tokens)
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = model.processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )
-        results = [
-            GenerationResult(raw=out, token_count=len(ids), error=False)
-            for out, ids in zip(output_text, generated_ids_trimmed)
-        ]
-        return results
-    def load_model_cpu():
-        kwargs = {
-            "device_map": "cpu",
-            "dtype": torch.float32,
-        }
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_ckpt, **kwargs
-        ).eval()
-        processor = Qwen3VLProcessor.from_pretrained(model_ckpt)
-        model.processor = processor
-        return model
 
-    _chandra_hf_module.generate_hf = generate_hf_cpu
-    _chandra_hf_module.load_model = load_model_cpu
+def sanitize_filename(value: str) -> str:
+    if not value:
+        return "ocr_log"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+    safe = safe.strip("._-")
+    if len(safe) > 120:
+        safe = safe[:120]
+    return safe or "ocr_log"
+
+
+def load_cfg():
+    if os.path.exists(CFG_FILE):
+        with open(CFG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cfg = DEFAULTS.copy()
+        cfg.update(data)
+        cfg.setdefault("amount_profiles", [])
+        cfg.setdefault("active_amount_profile", "")
+        cfg.setdefault("use_amount_profile", False)
+        return cfg
+    return DEFAULTS.copy()
+
+
+def save_cfg(cfg):
+    with open(CFG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def connect_rdp_window(title_re):
+    win = Desktop(backend="uia").window(title_re=title_re)
+    win.wait("exists ready", timeout=10)
     try:
-        _chandra_model_module.generate_hf = generate_hf_cpu
-        _chandra_model_module.load_model = load_model_cpu
+        client = win.child_window(control_type="Pane")
+        r = client.rectangle()
     except Exception:
-        pass
-    _CHANDRA_CPU_PATCHED = True
+        r = win.rectangle()
+        r = type(
+            "Rect",
+            (),
+            {
+                "left": r.left + 8,
+                "top": r.top + 40,
+                "right": r.right - 8,
+                "bottom": r.bottom - 8,
+            },
+        )()
+    win.set_focus()
+    return win, (r.left, r.top, r.right, r.bottom)
 
-from rdp_config import (
-    LOG_DIR,
-    DEFAULTS,
-    STREITWERT_MIN_AMOUNT,
-    FORCED_STREITWERT_EXCLUDES,
-    ensure_log_dir,
-    sanitize_filename,
-    load_cfg,
-    save_cfg,
+
+def rel_to_abs(rect, rel_box):
+    left, top, right, bottom = rect
+    w, h = right - left, bottom - top
+    if len(rel_box) == 2:
+        rx, ry = rel_box
+        return int(left + rx * w), int(top + ry * h)
+    rl, rt, rw, rh = rel_box
+    return (int(left + rl * w), int(top + rt * h), int(rw * w), int(rh * h))
+
+
+def abs_to_rel(rect, abs_point=None, abs_box=None):
+    left, top, right, bottom = rect
+    w, h = right - left, bottom - top
+    if abs_point:
+        x, y = abs_point
+        return [(x - left) / w, (y - top) / h]
+    x, y, bw, bh = abs_box
+    return [(x - left) / w, (y - top) / h, bw / w, bh / h]
+
+
+# Global thread-local storage for MSS
+_thread_local = threading.local()
+
+
+def get_mss():
+    if not hasattr(_thread_local, "sct"):
+        _thread_local.sct = mss()
+    return _thread_local.sct
+
+
+def grab_xywh(x, y, w, h):
+    sct = get_mss()
+    shot = sct.grab({"left": x, "top": y, "width": w, "height": h})
+    return Image.frombytes("RGB", shot.size, shot.rgb)
+
+
+def upscale_pil(img_pil, scale=3):
+    return (
+        img_pil.resize((img_pil.width * scale, img_pil.height * scale), Image.LANCZOS)
+        if scale > 1
+        else img_pil
+    )
+
+
+def do_ocr_color(img, lang="eng", psm=6):
+    common = r"--oem 3 -c preserve_interword_spaces=1"
+    cfg = f"--psm {psm} {common}"
+    return pytesseract.image_to_string(img, lang=lang, config=cfg).strip()
+
+
+def do_ocr_data(img, lang="eng", psm=6):
+    """Return pytesseract TSV DataFrame for line-by-line parsing."""
+    common = r"--oem 3 -c preserve_interword_spaces=1"
+    cfg = f"--psm {psm} {common}"
+    return pytesseract.image_to_data(
+        img, lang=lang, config=cfg, output_type=pytesseract.Output.DATAFRAME
+    )
+
+
+# ---------- Green-row detection (optional) ----------
+def find_green_band(color_img_pil):
+    if not _HAS_CV2:
+        return None
+    img = np.array(color_img_pil)  # RGB
+    hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    lower = np.array([35, 40, 40], dtype=np.uint8)
+    upper = np.array([85, 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    best, best_score = None, -1
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        score = w * max(1, h) - 3 * h
+        if score > best_score:
+            best_score, best = score, (x, y, w, h)
+    if best is None:
+        return None
+    x, y, w, h = best
+    pad_x = max(6, w // 20)
+    pad_y = max(2, h // 6)
+    x0 = max(0, x - pad_x)
+    y0 = max(0, y - pad_y)
+    x1 = min(img.shape[1], x + w + pad_x)
+    y1 = min(img.shape[0], y + h + pad_y)
+    return color_img_pil.crop((x0, y0, x1, y1))
+
+
+# ---------- Doclist OCR + Click helpers (used by Fees/Streitwert) ----------
+
+
+def _ocr_doclist_rows(self):
+    """
+    OCR the calibrated doclist_region and return a list of row TEXTS (strings).
+    Uses Tesseract's line grouping when available; otherwise groups by Y.
+    """
+    if not self._has("doclist_region"):
+        self.log_print("[Doclist OCR] doclist_region not configured.")
+        return []
+
+    x, y, w, h = self._get("doclist_region")
+    img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
+    df = do_ocr_data(img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6)
+
+    if df is None or "text" not in df.columns:
+        return []
+
+    # Keep only meaningful tokens
+    def _ok(s):
+        return bool(s) and str(s).strip() not in ("", "nan", None)
+
+    df = df.copy()
+    df["text"] = df["text"].astype(str)
+    df = df[df["text"].apply(_ok)]
+    if df.empty:
+        return []
+
+    rows = []
+    if {"block_num", "par_num", "line_num", "left", "top", "width", "height"}.issubset(
+        df.columns
+    ):
+        # Group by Tesseract line identifiers
+        for (b, p, l), g in df.groupby(["block_num", "par_num", "line_num"], sort=True):
+            g = g.sort_values("left")
+            txt = " ".join(t.strip() for t in g["text"].tolist() if t.strip())
+            if txt:
+                rows.append(txt)
+    else:
+        # Fallback: group by Y proximity
+        df = df.sort_values("top")
+        tol = max(8, int(img.height * 0.01))
+        current_y = None
+        buf = []
+        for _, r in df.iterrows():
+            if current_y is None or abs(int(r["top"]) - current_y) <= tol:
+                buf.append(str(r["text"]).strip())
+                if current_y is None:
+                    current_y = int(r["top"])
+            else:
+                line = " ".join(t for t in buf if t)
+                if line:
+                    rows.append(line)
+                buf = [str(r["text"]).strip()]
+                current_y = int(r["top"])
+        if buf:
+            line = " ".join(t for t in buf if t)
+            if line:
+                rows.append(line)
+
+    # Light cleanup & de-dup short artifacts
+    cleaned = []
+    for s in rows:
+        s2 = " ".join(s.split())
+        if len(s2) >= 2:
+            if not cleaned or cleaned[-1] != s2:
+                cleaned.append(s2)
+    self.log_print(f"[Doclist OCR] lines: {len(cleaned)}")
+    return cleaned
+
+
+def _ocr_doclist_rows_boxes(self):
+    """
+    Return list of (text, (lx,ty,rx,by)) for each detected line in doclist_region.
+    These boxes are **relative to the doclist image** (not absolute screen).
+    """
+    if not self._has("doclist_region"):
+        self.log_print("[Doclist OCR] doclist_region not configured.")
+        return []
+
+    x, y, w, h = self._get("doclist_region")
+    img = self._grab_region_color(x, y, w, h, upscale_x=self.upscale_var.get())
+    df = do_ocr_data(img, lang=(self.lang_var.get().strip() or "deu+eng"), psm=6)
+    if df is None or "text" not in df.columns:
+        return []
+
+    def _ok(s):
+        return bool(s) and str(s).strip() not in ("", "nan", None)
+
+    df = df.copy()
+    df["text"] = df["text"].astype(str)
+    df = df[df["text"].apply(_ok)]
+    if df.empty:
+        return []
+
+    lines = []
+    if {"block_num", "par_num", "line_num", "left", "top", "width", "height"}.issubset(
+        df.columns
+    ):
+        for (b, p, l), g in df.groupby(["block_num", "par_num", "line_num"], sort=True):
+            g = g.sort_values("left")
+            txt = " ".join(t.strip() for t in g["text"].tolist() if t.strip())
+            if not txt:
+                continue
+            lx = int(g["left"].min())
+            ty = int(g["top"].min())
+            rx = int((g["left"] + g["width"]).max())
+            by = int((g["top"] + g["height"]).max())
+            lines.append((txt, (lx, ty, rx, by)))
+    else:
+        df = df.sort_values("top")
+        tol = max(8, int(img.height * 0.01))
+        cur_top = None
+        cur = []
+        for _, r in df.iterrows():
+            if cur_top is None or abs(int(r["top"]) - cur_top) <= tol:
+                cur.append(r)
+                if cur_top is None:
+                    cur_top = int(r["top"])
+            else:
+                if cur:
+                    lx = min(int(rr["left"]) for rr in cur)
+                    ty = min(int(rr["top"]) for rr in cur)
+                    rx = max(int(rr["left"] + rr["width"]) for rr in cur)
+                    by = max(int(rr["top"] + rr["height"]) for rr in cur)
+                    txt = " ".join(
+                        str(rr["text"]).strip()
+                        for rr in sorted(cur, key=lambda t: int(t["left"]))
+                        if str(rr["text"]).strip()
+                    )
+                    if txt:
+                        lines.append((txt, (lx, ty, rx, by)))
+                cur = [r]
+                cur_top = int(r["top"])
+        if cur:
+            lx = min(int(rr["left"]) for rr in cur)
+            ty = min(int(rr["top"]) for rr in cur)
+            rx = max(int(rr["left"] + rr["width"]) for rr in cur)
+            by = max(int(rr["top"] + rr["height"]) for rr in cur)
+            txt = " ".join(
+                str(rr["text"]).strip()
+                for rr in sorted(cur, key=lambda t: int(t["left"]))
+                if str(rr["text"]).strip()
+            )
+            if txt:
+                lines.append((txt, (lx, ty, rx, by)))
+
+    self.log_print(f"[Doclist OCR] lines+boxes: {len(lines)}")
+    return lines
+
+
+def _click_doclist_row(self, row_idx: int):
+    """
+    Click the center of the given row index inside the doclist_region using OCR boxes.
+    Returns True on success, False otherwise.
+    """
+    if row_idx is None or row_idx < 0:
+        return False
+    rows = self._ocr_doclist_rows_boxes()
+    if not rows or row_idx >= len(rows):
+        return False
+
+    # target box in doclist image coords
+    _, (lx, ty, rx, by) = rows[row_idx]
+    cx = (lx + rx) // 2
+    cy = (ty + by) // 2
+
+    # map to absolute screen coords using calibrated doclist_region and current_rect
+    X, Y, W, H = self._get("doclist_region")
+    abs_x = X + cx
+    abs_y = Y + cy
+
+    try:
+        pyautogui.click(abs_x, abs_y)
+        time.sleep(0.08)
+        return True
+    except Exception as e:
+        self.log_print(f"[Doclist OCR] click failed: {e}")
+        return False
+
+
+# ---------- OCR TSV helpers (Streitwert) ----------
+AMOUNT_TOKEN_TRANSLATE = str.maketrans(
+    {"O": "0", "o": "0", "S": "5", "s": "5", "l": "1", "I": "1", "B": "8"}
 )
 
-from rdp_helpers import (
-    connect_rdp_window,
-    get_mss,
-    rel_to_abs,
-    abs_to_rel,
-    grab_xywh,
-    upscale_pil,
-    do_ocr_color,
-    do_ocr_data,
-    find_green_band,
-    normalize_line,
-    normalize_line_soft,
-    normalize_for_token_match,
-    normalize_gg_candidate,
-    is_gg_label,
-    clean_amount_display,
-    find_amount_candidates,
-    build_streitwert_keywords,
-    lines_from_tsv,
-    _grab_region_color_generic,
-    DATE_RE,
-    DOC_LOADING_PATTERNS,
-    extract_amount_from_lines,
+
+# Treat punctuation, borders, and filler as noise (not real text)
+_NOISE_RE = re.compile(r"^[_\-–—\|:;.,'\"`~^°()+\[\]{}<>\\\/]+$")
+_AZ_CASE_RE = re.compile(r"\b\d+\s*[A-ZÄÖÜ]\s*\d+/\d+\b")
+
+
+def _is_meaningful_token(s: str) -> bool:
+    if not s:
+        return False
+    s = s.strip()
+    if not s or s.lower() == "nan":
+        return False
+    # pure separators / borders → noise
+    if _NOISE_RE.fullmatch(s):
+        return False
+    # a single stray character is likely noise
+    if len(s) == 1 and not s.isalnum():
+        return False
+    return True
+
+
+# Moved to class method
+
+
+def _translate_numeric_token(token: str) -> str:
+    if not token:
+        return token
+    if re.search(r"[0-9]", token):
+        return token.translate(AMOUNT_TOKEN_TRANSLATE)
+    if re.search(r"(EUR|€)", token, re.IGNORECASE):
+        return token.translate(AMOUNT_TOKEN_TRANSLATE)
+    return token
+
+
+def normalize_line(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = text.replace("\u0080", "€")
+    parts = re.split(r"(\s+)", text)
+    pieces = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isspace():
+            pieces.append(part)
+        else:
+            pieces.append(_translate_numeric_token(part))
+    joined = "".join(pieces)
+    joined = re.sub(r"\s+", " ", joined).strip()
+    joined = re.sub(r"\beur\b", "EUR", joined, flags=re.IGNORECASE)
+    return joined
+
+
+TOKEN_MATCH_TRANSLATE = str.maketrans(
+    {
+        "0": "o",
+        "1": "l",
+        "5": "s",
+        "7": "t",
+        "8": "b",
+        "9": "g",
+    }
 )
+
+
+def normalize_for_token_match(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text.translate(TOKEN_MATCH_TRANSLATE)
+
+
+GG_LABEL_TRANSLATE = str.maketrans(
+    {"6": "G", "0": "G", "O": "G", "Q": "G", "C": "G", "€": "G"}
+)
+GG_EXTENDED_SUFFIX_RE = re.compile(
+    r"^(?:GEMAESS|GEMAE?S|GEM|GEMAES)[A-Z0-9]*URT[A-Z0-9]*$"
+)
+
+
+def normalize_gg_candidate(text: str) -> str:
+    if not text:
+        return ""
+    normalized = normalize_line(text)
+    normalized = normalized.replace(":", " ")
+    normalized = re.sub(r"[^A-Z0-9]", "", normalized.upper())
+    translated = normalized.translate(GG_LABEL_TRANSLATE)
+    if len(translated) >= 2:
+        gg_pos = translated.find("GG")
+        if gg_pos > 0:
+            translated = translated[gg_pos:]
+    return translated
+
+
+def is_gg_label(text: str) -> bool:
+    normalized = normalize_gg_candidate(text)
+    if not normalized:
+        return False
+    if normalized == "GG":
+        return True
+    if normalized.startswith("GG"):
+        remainder = normalized[2:]
+        if not remainder:
+            return True
+        if GG_EXTENDED_SUFFIX_RE.match(remainder):
+            return True
+    return False
+
+
+AMOUNT_RE = re.compile(
+    r"(?:€\s*)?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{2}|,-)?(?:\s*(?:EUR|€))?",
+    re.IGNORECASE,
+)
+AMOUNT_CANDIDATE_RE = re.compile(
+    r"(?:€\s*)?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[,\.]\d{2}|,-)?(?:\s*(?:EUR|€))?",
+    re.IGNORECASE,
+)
+DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+INVOICE_RE = re.compile(r"\b\d{6,}\b")
+
+
+def extract_amount_from_text(text: str, min_value=None):
+    candidates = find_amount_candidates(text)
+    if not candidates:
+        return None
+
+    min_decimal = None
+    if min_value is not None:
+        try:
+            min_decimal = Decimal(str(min_value))
+        except Exception:
+            min_decimal = None
+
+    if min_decimal is not None:
+        candidates = [
+            c
+            for c in candidates
+            if c.get("value") is not None and c["value"] >= min_decimal
+        ]
+        if not candidates:
+            return None
+
+    best = max(candidates, key=lambda c: c["value"])
+    return best["display"] if best else None
+
+
+def clean_amount_display(amount: str) -> str:
+    if not amount:
+        return amount
+    amt = amount.strip()
+    # ensure consistent spacing before currency suffix
+    amt = re.sub(r"(\d)(EUR|€)$", r"\1 \2", amt, flags=re.IGNORECASE)
+    amt = re.sub(r"\s+(EUR|€)$", r" \1", amt, flags=re.IGNORECASE)
+
+    # remove leading zero-padded fragments that belong to invoice prefixes
+    leading = re.match(r"^0\d{2}\s+", amt)
+    if leading:
+        remainder = amt[leading.end() :].strip()
+        remainder = re.sub(r"(\d)(EUR|€)$", r"\1 \2", remainder, flags=re.IGNORECASE)
+        remainder = re.sub(r"\s+(EUR|€)$", r" \1", remainder, flags=re.IGNORECASE)
+        if remainder and AMOUNT_RE.fullmatch(remainder):
+            amt = remainder
+    return amt
+
+
+def normalize_amount_candidate(raw_amount: str):
+    if not raw_amount:
+        return None
+
+    text = unicodedata.normalize("NFKC", str(raw_amount))
+    currency_match = re.search(r"(EUR|€)", text, re.IGNORECASE)
+    currency_suffix = ""
+    if currency_match:
+        symbol = currency_match.group(1)
+        currency_suffix = " EUR" if symbol.upper().startswith("EUR") else " €"
+
+    text = re.sub(r"(EUR|€)", "", text, flags=re.IGNORECASE)
+    text = text.replace("\u202f", " ").replace("\xa0", " ")
+    text = text.replace("−", "-")
+    text = text.replace("'", "").replace("`", "").replace("´", "")
+    text = text.strip()
+    text = re.sub(r",-+$", ",00", text)
+
+    negative = False
+    if text.startswith("-"):
+        negative = True
+        text = text[1:]
+
+    text = text.replace(" ", "")
+    text = re.sub(r"[^0-9,.-]", "", text)
+    if not text:
+        return None
+
+    has_comma = "," in text
+    has_dot = "." in text
+    decimal_sep = None
+
+    if has_comma and has_dot:
+        decimal_sep = "," if text.rfind(",") > text.rfind(".") else "."
+    elif has_comma:
+        digits_after = len(re.sub(r"[^0-9]", "", text[text.rfind(",") + 1 :]))
+        if 0 < digits_after <= 2:
+            decimal_sep = ","
+    elif has_dot:
+        digits_after = len(re.sub(r"[^0-9]", "", text[text.rfind(".") + 1 :]))
+        if 0 < digits_after <= 2:
+            decimal_sep = "."
+
+    if decimal_sep:
+        sep_idx = text.rfind(decimal_sep)
+        integer_raw = text[:sep_idx]
+        decimal_raw = text[sep_idx + 1 :]
+    else:
+        integer_raw = text
+        decimal_raw = ""
+
+    integer_part = re.sub(r"[^0-9]", "", integer_raw)
+    decimal_part = re.sub(r"[^0-9]", "", decimal_raw)
+
+    if not integer_part:
+        integer_part = "0"
+
+    if not decimal_part:
+        decimal_part = "00"
+    elif len(decimal_part) == 1:
+        decimal_part = f"{decimal_part}0"
+    elif len(decimal_part) > 2:
+        decimal_part = decimal_part[:2]
+
+    try:
+        value = Decimal(f"{int(integer_part)}.{decimal_part}")
+    except (InvalidOperation, ValueError):
+        return None
+
+    if negative:
+        value = -value
+
+    formatted_int = f"{int(integer_part):,}".replace(",", ".")
+    formatted = f"{formatted_int},{decimal_part}"
+    if negative:
+        formatted = f"-{formatted}"
+    if currency_suffix:
+        formatted = f"{formatted}{currency_suffix}"
+
+    return clean_amount_display(formatted), value
+
+
+def _amount_search_variants(normalized: str):
+    variants = {normalized}
+    if not normalized:
+        return variants
+    # keep separators tight like "1, 23" -> "1,23"
+    compact_decimal = re.sub(r"([.,])\s+(?=\d)", r"\1", normalized)
+    variants.add(compact_decimal)
+    # ensure exactly one space before the currency suffix
+    variants.add(re.sub(r"\s+(?=(?:EUR|€)\b)", " ", compact_decimal))
+    return {v for v in variants if v}
+
+
+def find_amount_candidates(text: str):
+    if not text:
+        return []
+    normalized = normalize_line(text)
+
+    # NEW: neutralize dates so they can't bleed into amount matches
+    safe = DATE_RE.sub(" ", normalized)
+    # Also neutralize invoice numbers to prevent them from sticking to amounts
+    safe = re.sub(INVOICE_RE, " ", safe)
+
+    seen = set()
+    candidates = []
+    for variant in _amount_search_variants(safe):
+        for match in AMOUNT_CANDIDATE_RE.finditer(variant):
+            raw = match.group(0)
+            if (
+                not re.search(r"(EUR|€)", raw, re.IGNORECASE)
+                and "," not in raw
+                and "." not in raw
+            ):
+                continue
+            parsed = normalize_amount_candidate(raw)
+            if not parsed:
+                continue
+            display, value = parsed
+            key = (display, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"display": display, "value": value})
+    return candidates
+
+
+def build_streitwert_keywords(term):
+    seen_keywords = set()
+    keyword_candidates = []
+    for candidate in [
+        term,
+        "Streitwert",
+        "Streitwertes",
+        "Streitwerts",
+        "Streitgegenstand",
+        "Streitgegenstandes",
+        "Streitwert des Verfahrens",
+        "Der Streitwert des Verfahrens",
+        "Der Streitwert des Verfahrens wird",
+        "Der Streitwert des Verfahrens wird auf",
+        "Der Streitwert des Verfahrens wird auf bis zu",
+        "Streitwert wurde",
+        "Streitwert wird",
+        "Streitwert wird auf",
+        "Streitwert wird auf bis zu",
+        "Streitwert wird bis",
+        "Streitwert wird bis zu",
+        "Der Streitwert wird auf",
+        "Der Streitwert wird auf bis zu",
+        "Der Streitwert wird bis",
+        "Der Streitwert wird bis zu",
+        "Die Streitwertfestsetzung",
+        "Die Streitwertfestsetzung hatte",
+        "Die Streitwertfestsetzung hatte einheitlich",
+        "Die Streitwertfestsetzung hatte einheitlich auf",
+        "Die Streitwertfestsetzung hatte einheitlich auf bis zu",
+        "Streitwertfestsetzung",
+        "Streitwertfestsetzung hatte",
+        "Streitwertfestsetzung hatte einheitlich",
+        "Streitwertfestsetzung hatte einheitlich auf",
+        "Streitwertfestsetzung hatte einheitlich auf bis zu",
+        "Streitwert beträgt",
+        "Streitwert bis",
+        "Streitwert bis Euro",
+        "Streitwert bis EUR",
+        "Streitwert bis zu",
+        "Streitwert bis zu EUR",
+        "Streitwert bis zu Euro",
+        "wird auf",
+        "wird vorläufig",
+        "wird vorläufig auf",
+        "wird vorlaufig",
+        "wird vorlaufig auf",
+        "der wird auf",
+        "der wird vorläufig",
+        "der wird vorläufig auf",
+        "der wird vorlaufig",
+        "der wird vorlaufig auf",
+        "wird auf bis",
+        "wird auf bis zu",
+        "wird bis",
+        "wird bis zu",
+        "der wird bis",
+        "der wird bis zu",
+        "festgesetzt",
+        "festgesetzt auf",
+        "bis zu",
+        "biszu",
+        "bis euro",
+        "gesetzt",
+        "beträgt",
+    ]:
+        if candidate is None:
+            continue
+        key = str(candidate).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen_keywords:
+            continue
+        seen_keywords.add(low)
+        keyword_candidates.append(key)
+    return keyword_candidates
+
+
+DOC_LOADING_PATTERNS = (
+    "dokumente werden geladen",
+    "dokumente werden gel",
+    "suche läuft",
+    "suche lauft",
+    "suche laeuft",
+    "suche lauf",
+    "daten werden geladen",
+    "daten werden gel",
+    "datei wird geladen",
+    "datei wird gel",
+    "bitte warten",
+    "bitte warte",
+    "wird geladen",
+    "wird gelad",
+    "wird geoffnet",
+    "wird geöffnet",
+    "werden vorbereitet",
+    "wird vorbereitet",
+    "lade daten",
+    "lade datei",
+    "laden",
+)
+
+LOG_SECTION_RE = re.compile(r"^\s*\[[^\]]*\]\s*Section:\s*(.+)$", re.IGNORECASE)
+LOG_ENTRY_RE = re.compile(r"^\s*(\d{3}):\s*\(([^)]*)\)\s*->\s*(.*)$")
+LOG_SOFT_RE = re.compile(r"^\s*soft:\s*(.*)$", re.IGNORECASE)
+LOG_NORM_RE = re.compile(r"^\s*norm:\s*(.*)$", re.IGNORECASE)
+LOG_KEYWORD_RE = re.compile(r"^\s*Keywords:\s*(.*)$", re.IGNORECASE)
+
+
+def lines_from_tsv(tsv_df, scale=1):
+    """
+    From pytesseract data -> [(x,y,w,h,text), ...] top-to-bottom, left-to-right.
+    Coordinates are normalised by the supplied scale factor (if any).
+    """
+    if tsv_df is None or tsv_df.empty:
+        return []
+    df = tsv_df.dropna(subset=["text"])
+    df = df[df["conf"] > -1]
+    try:
+        scale_val = float(scale)
+    except Exception:
+        scale_val = 1.0
+    scale_val = max(scale_val, 1.0)
+    lines = []
+    for (_, _, _), grp in df.groupby(["block_num", "par_num", "line_num"]):
+        lefts = grp["left"]
+        rights = grp["left"] + grp["width"]
+        tops = grp["top"]
+        bottoms = grp["top"] + grp["height"]
+        xs = min(lefts) / scale_val
+        ys = min(tops) / scale_val
+        w = (max(rights) - min(lefts)) / scale_val
+        h = (max(bottoms) - min(tops)) / scale_val
+        txt = " ".join(str(t) for t in grp["text"] if str(t).strip())
+        if txt.strip():
+            lines.append(
+                (
+                    int(round(xs)),
+                    int(round(ys)),
+                    int(round(w)),
+                    int(round(h)),
+                    txt.strip(),
+                )
+            )
+    lines.sort(key=lambda x: (x[1], x[0]))
+    return lines
+
+
+def _grab_region_color_generic(current_rect, rel_box, upscale):
+    rx, ry, rw, rh = rel_to_abs(current_rect, rel_box)
+    img = grab_xywh(rx, ry, rw, rh)
+    try:
+        scale_val = int(float(upscale))
+    except Exception:
+        scale_val = 3
+    scale = max(1, scale_val)
+    return upscale_pil(img, scale=scale), scale
+
+
+# ---------- Normalization / parsing ----------
+def normalize_line_soft(text: str) -> str:
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = text.replace("\u0080", "€")
+    parts = re.split(r"(\s+)", text)
+    pieces = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isspace():
+            pieces.append(part)
+            continue
+        if re.search(r"[0-9]", part) or re.search(r"(EUR|€)", part, re.IGNORECASE):
+            pieces.append(_translate_numeric_token(part))
+        else:
+            pieces.append(part.lower())
+    joined = "".join(pieces)
+    joined = re.sub(r"\s+", " ", joined).strip()
+    joined = re.sub(r"\beur\b", "EUR", joined, flags=re.IGNORECASE)
+    joined = re.sub(r"(\d+)\.(\d{2})\b", r"\1,\2", joined)
+    return joined
+
+
+def extract_amount_from_lines(lines, keyword=None, min_value=None):
+    if not lines:
+        return None, None
+
+    processed = []
+    for entry in lines:
+        if isinstance(entry, (list, tuple)) and len(entry) == 5:
+            x, y, w, h, text = entry
+        else:
+            y, text = entry
+            x = w = h = None
+        processed.append(
+            {
+                "y": y,
+                "text": text or "",
+                "norm": normalize_line_soft(text or ""),
+                "candidates": find_amount_candidates(text or ""),
+            }
+        )
+
+    combo_cache = {}
+
+    def combo_info(idx, span):
+        key = (idx, span)
+        if key in combo_cache:
+            return combo_cache[key]
+        parts_text = []
+        for offset in range(span):
+            j = idx + offset
+            if j >= len(processed):
+                combo_cache[key] = ("", [])
+                return combo_cache[key]
+            parts_text.append(processed[j]["text"])
+        combined_text = " ".join(part for part in parts_text if part).strip()
+        combined_norm = normalize_line_soft(combined_text) if combined_text else ""
+        if not combined_norm:
+            combo_cache[key] = ("", [])
+            return combo_cache[key]
+        combo_cache[key] = (
+            combined_norm,
+            find_amount_candidates(combined_text),
+        )
+        return combo_cache[key]
+
+    def candidate_variants(idx):
+        if idx < 0 or idx >= len(processed):
+            return
+        info = processed[idx]
+        seen = set()
+        for cand in info["candidates"]:
+            key = (cand["display"], cand["value"])
+            if key in seen:
+                continue
+            seen.add(key)
+            yield info["norm"], cand
+        for span in (2, 3):
+            combined_norm, combo_candidates = combo_info(idx, span)
+            if not combo_candidates:
+                continue
+            for cand in combo_candidates:
+                key = (cand["display"], cand["value"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield combined_norm, cand
+
+    try:
+        min_decimal = Decimal(str(min_value)) if min_value is not None else None
+    except Exception:
+        min_decimal = None
+
+    def pick_best(indices, required_keywords=None):
+        best = None
+        best_line = None
+        best_value = None
+        best_score = None
+        if isinstance(required_keywords, str):
+            required_terms = [required_keywords.strip().lower()]
+        else:
+            required_terms = [
+                str(term).strip().lower()
+                for term in (required_keywords or [])
+                if str(term).strip()
+            ]
+
+        keyword_cache = {}
+
+        def keyword_info(line_norm):
+            cached = keyword_cache.get(line_norm)
+            if cached is not None:
+                return cached
+            compact = re.sub(r"\s+", "", line_norm)
+            alnum = re.sub(r"[^0-9a-z€]+", "", line_norm)
+            norm_positions = []
+            compact_positions = []
+            alnum_positions = []
+            for term in required_terms:
+                if not term:
+                    continue
+                idx_norm = line_norm.find(term)
+                if idx_norm != -1:
+                    norm_positions.append(idx_norm)
+                compact_term = re.sub(r"\s+", "", term)
+                if compact_term:
+                    idx_compact = compact.find(compact_term)
+                    if idx_compact != -1:
+                        compact_positions.append(idx_compact)
+                alnum_term = re.sub(r"[^0-9a-z€]+", "", term)
+                if alnum_term:
+                    idx_alnum = alnum.find(alnum_term)
+                    if idx_alnum != -1:
+                        alnum_positions.append(idx_alnum)
+            info = {
+                "compact": compact,
+                "alnum": alnum,
+                "norm_positions": norm_positions,
+                "compact_positions": compact_positions,
+                "alnum_positions": alnum_positions,
+            }
+            keyword_cache[line_norm] = info
+            return info
+
+        for idx in indices:
+            for line_text, candidate in candidate_variants(idx) or []:
+                line_norm = (line_text or "").lower()
+                if required_terms:
+                    info_kw = keyword_info(line_norm)
+                    compact_line = info_kw["compact"]
+                    alnum_line = info_kw["alnum"]
+                    norm_positions = info_kw["norm_positions"]
+                    compact_positions = info_kw["compact_positions"]
+                    alnum_positions = info_kw["alnum_positions"]
+                    has_keyword = bool(
+                        norm_positions or compact_positions or alnum_positions
+                    )
+                    if not has_keyword:
+                        continue
+                    priority = 1
+                else:
+                    compact_line = re.sub(r"\s+", "", line_norm)
+                    alnum_line = re.sub(r"[^0-9a-z€]+", "", line_norm)
+                    norm_positions = compact_positions = alnum_positions = []
+                    priority = 0
+                value = candidate.get("value")
+                if value is None:
+                    continue
+                if min_decimal is not None and value < min_decimal:
+                    continue
+                cand_display = candidate.get("display", "")
+                cand_norm = normalize_line_soft(cand_display).lower()
+                cand_compact = re.sub(r"\s+", "", cand_norm)
+                cand_alnum = re.sub(r"[^0-9a-z€]+", "", cand_norm)
+                cand_idx = -1
+                variant_used = "norm"
+                if cand_norm:
+                    cand_idx = line_norm.find(cand_norm)
+                if cand_idx == -1 and cand_compact:
+                    cand_idx = compact_line.find(cand_compact)
+                    if cand_idx != -1:
+                        variant_used = "compact"
+                if cand_idx == -1 and cand_alnum:
+                    cand_idx = alnum_line.find(cand_alnum)
+                    if cand_idx != -1:
+                        variant_used = "alnum"
+                distance_score = 0
+                after_keyword = 0
+                if required_terms:
+                    if (
+                        not (norm_positions or compact_positions or alnum_positions)
+                        or cand_idx == -1
+                    ):
+                        continue
+                    if variant_used == "norm":
+                        positions = (
+                            norm_positions or compact_positions or alnum_positions
+                        )
+                    elif variant_used == "compact":
+                        positions = (
+                            compact_positions or norm_positions or alnum_positions
+                        )
+                    else:
+                        positions = (
+                            alnum_positions or compact_positions or norm_positions
+                        )
+                    diffs = [cand_idx - pos for pos in positions if cand_idx >= pos]
+                    if diffs:
+                        after_keyword = 1
+                        distance_score = -min(diffs)
+                    else:
+                        continue
+                position_score = -cand_idx if cand_idx >= 0 else float("-inf")
+                score_tuple = (
+                    priority + after_keyword,
+                    after_keyword,
+                    distance_score,
+                    position_score,
+                    value,
+                )
+                if best_score is None or score_tuple > best_score:
+                    best = candidate
+                    best_line = line_text
+                    best_value = value
+                    best_score = score_tuple
+        if best:
+            if min_decimal is not None and (
+                best_value is None or best_value < min_decimal
+            ):
+                return None, None, None
+            return best.get("display"), best_line, best_value
+        return None, None, None
+
+    if isinstance(keyword, (list, tuple, set)):
+        keys = [str(k) for k in keyword if k is not None and str(k).strip()]
+    elif keyword:
+        keys = [str(keyword)]
+    else:
+        keys = []
+
+    keys_norm = [
+        normalize_line_soft(str(k).strip()).lower() for k in keys if str(k).strip()
+    ]
+
+    k_amt = k_line = None
+    k_val = None
+
+    def collect_candidate_indices(key_norm):
+        keyword_indices = [
+            idx
+            for idx, info in enumerate(processed)
+            if key_norm in info["norm"].lower()
+        ]
+        if not keyword_indices:
+            return []
+        offsets = [0, 1, -1, 2, -2]
+        candidate_indices = []
+        for idx in keyword_indices:
+            for offset in offsets:
+                candidate_indices.append(idx + offset)
+        seen = set()
+        ordered = []
+        for idx in candidate_indices:
+            if idx not in seen:
+                seen.add(idx)
+                ordered.append(idx)
+        return ordered
+
+    for key in keys:
+        key_norm = normalize_line_soft(str(key).strip()).lower()
+        if not key_norm:
+            continue
+        candidate_indices = collect_candidate_indices(key_norm)
+        if not candidate_indices:
+            continue
+        amt, line, val = pick_best(candidate_indices, required_keywords=keys_norm)
+        if not amt:
+            continue
+        current_val = val if val is not None else Decimal("0")
+        stored_val = k_val if k_val is not None else Decimal("0")
+        if k_amt is None or current_val > stored_val:
+            k_amt, k_line, k_val = amt, line, val
+
+    if k_amt:
+        return k_amt, k_line
+
+    if keys:
+        return None, None
+
+    g_amt, g_line, _ = pick_best(range(len(processed)))
+    if g_amt:
+        return g_amt, g_line
+
+    combined_text = "\n".join(info["norm"] for info in processed if info["norm"]) or ""
+    fallback = extract_amount_from_text(combined_text, min_value=min_decimal)
+    if fallback:
+        return fallback, combined_text
+
+    return None, None
+
 
 # ------------------ App Class ------------------
 class RDPApp(tk.Tk):
@@ -188,6 +1238,11 @@ class RDPApp(tk.Tk):
     _WORDS_HINT_RE = re.compile(
         r"\b(?:euro|eur|tausend|hundert|einhundert|zweihundert|dreihundert|vierhundert|fuenf|fünf|sechs|sieben|acht|neun|zehn|elf|zwoelf|zwölf|zwanzig|dreissig|dreißig|vierzig|fuenfzig|fünfzig|sechzig|siebzig|achtzig|neunzig)\b",
         re.IGNORECASE,
+    )
+
+    _AKTEN_AZ_RE = re.compile(r"\bAZ\s*[:\-]?\s*([0-9A-Za-z./-]+)", re.IGNORECASE)
+    _AKTEN_DATE_RE = re.compile(
+        r"\b([A-Za-zÄÖÜäöüß]+),\s*(\d{2}\.\d{2}\.\d{4})\b", re.UNICODE
     )
 
     # --- Doclist OCR + Click helpers ---
@@ -644,7 +1699,7 @@ class RDPApp(tk.Tk):
                 f.write(f"Inst2: {data['col_II_text']}\n")
                 f.write(f"Inst3: {data['col_III_text']}\n")
                 f.write(f"Detected: {info['instance']}\n")
-            self.log_print(f"Saved instance OCR report ? {path}")
+            self.log_print(f"Saved instance OCR report → {path}")
 
         except Exception as e:
             try:
@@ -680,7 +1735,7 @@ class RDPApp(tk.Tk):
         self.log_print(f"{prefix}  II : {(data['col_II_text'] or '(empty)').strip()}")
         self.log_print(f"{prefix}  III: {(data['col_III_text'] or '(empty)').strip()}")
         self.log_print(
-            f"{prefix}Instance detection: I={I}, II={II}, III={III} ? "
+            f"{prefix}Instance detection: I={I}, II={II}, III={III} → "
             f"{('undetermined' if inst is None else f'{inst}. Instanz')}"
         )
 
@@ -753,13 +1808,6 @@ class RDPApp(tk.Tk):
         self._preview_ready_event = threading.Event()
         self._preview_last_token = 0
         self._preview_target_token = 0
-        self._chandra_models = {}
-        self.ocr_primary_var = tk.StringVar(
-            value=(self.cfg.get("ocr_primary") or "tesseract")
-        )
-        self.ocr_secondary_var = tk.StringVar(
-            value=(self.cfg.get("ocr_secondary") or "none")
-        )
 
         # Initialize MSS in the main thread
         get_mss()
@@ -826,10 +1874,11 @@ class RDPApp(tk.Tk):
         streit_tab = ttk.Frame(notebook)
         rechn_tab = ttk.Frame(notebook)
         fees_tab = ttk.Frame(notebook)
+        akten_tab = ttk.Frame(notebook)
         log_tab = ttk.Frame(notebook)
         ocr_tab = ttk.Frame(notebook)
 
-        notebook.add(general_tab, text="Settings")
+        notebook.add(general_tab, text="General")
         notebook.add(calibration_tab, text="Calibration")
         notebook.add(streit_tab, text="Streitwert")
         notebook.add(rechn_tab, text="Rechnungen")
@@ -1037,6 +2086,74 @@ class RDPApp(tk.Tk):
             command=self.run_fees,
         ).pack(anchor="w", pady=(4, 0))
 
+        notebook.add(akten_tab, text="Akten")
+
+        akten_frame = ttk.LabelFrame(akten_tab, text="Document Filter Workflow")
+        akten_frame.pack(fill=tk.BOTH, expand=True, pady=4)
+        ttk.Label(
+            akten_frame,
+            text=(
+                "Searches for 'Aufforderungsschreiben', opens each result, reads the "
+                "AZ from the filter panel, and extracts the date from the PDF."
+            ),
+            wraplength=360,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Button(
+            akten_frame,
+            text="Pick Document Filter Region",
+            command=self.pick_akten_document_filter_region,
+        ).pack(anchor="w", pady=(4, 2))
+        ttk.Label(
+            akten_frame, text="Document Filter Region (l%, t%, w%, h%)"
+        ).pack(anchor="w")
+        df_box = self.cfg.get("akten_document_filter_region", [0, 0, 0, 0])
+        self.akten_filter_var = tk.StringVar(value=self._format_rel_box(df_box))
+        ttk.Entry(
+            akten_frame,
+            textvariable=self.akten_filter_var,
+            width=42,
+            state="readonly",
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(akten_frame, text="Search term").pack(anchor="w", pady=(6, 0))
+        self.akten_search_var = tk.StringVar(
+            value=self.cfg.get("akten_search_term", "Aufforderungsschreiben")
+        )
+        ttk.Entry(
+            akten_frame, textvariable=self.akten_search_var, width=32
+        ).pack(anchor="w")
+
+        ttk.Label(
+            akten_frame,
+            text="Ignore cases (comma/semicolon separated)",
+        ).pack(anchor="w", pady=(8, 0))
+        self.akten_ignore_var = tk.StringVar(
+            value=self.cfg.get("akten_ignore_tokens", "")
+        )
+        ttk.Entry(
+            akten_frame, textvariable=self.akten_ignore_var, width=48
+        ).pack(anchor="w")
+
+        ttk.Label(
+            akten_frame,
+            text=(
+                "Use Test Setup to verify calibration quickly before running the full "
+                "automation workaround."
+            ),
+            wraplength=360,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(8, 0))
+        akten_btns = ttk.Frame(akten_frame)
+        akten_btns.pack(anchor="w", pady=(6, 0))
+        ttk.Button(
+            akten_btns, text="Test Setup", command=self.test_akten_setup
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            akten_btns,
+            text="Run Akten Extraction",
+            command=self.run_akten_threaded,
+        ).pack(side=tk.LEFT)
+
         notebook.add(log_tab, text="Log")
         notebook.add(ocr_tab, text="OCR / Profiles")
 
@@ -1113,54 +2230,6 @@ class RDPApp(tk.Tk):
         ttk.Entry(tess_frame, textvariable=self.lang_var, width=16).pack(
             anchor="w", pady=(0, 6)
         )
-
-        chandra_frame = ttk.LabelFrame(general_tab, text="Chandra OCR")
-        chandra_frame.pack(fill=tk.X, pady=4)
-        ttk.Label(chandra_frame, text="Test region (l%, t%, w%, h%)").pack(anchor="w")
-        chandra_box = self.cfg.get("chandra_region")
-        if (
-            isinstance(chandra_box, (list, tuple))
-            and len(chandra_box) == 4
-            and all(isinstance(v, (int, float)) for v in chandra_box)
-        ):
-            chandra_text = ", ".join(f"{v:.3f}" for v in chandra_box)
-        else:
-            chandra_text = "(not set)"
-        self.chandra_region_var = tk.StringVar(value=chandra_text)
-        ttk.Entry(
-            chandra_frame,
-            textvariable=self.chandra_region_var,
-            width=40,
-            state="readonly",
-        ).pack(anchor="w", pady=(0, 4))
-        ttk.Button(
-            chandra_frame, text="Pick Chandra Region", command=self.pick_chandra_region
-        ).pack(anchor="w")
-        ttk.Label(chandra_frame, text="Inference method").pack(anchor="w", pady=(6, 0))
-        method_value = (self.cfg.get("chandra_method") or "vllm").strip().lower()
-        if method_value not in ("vllm", "hf"):
-            method_value = "vllm"
-        self.chandra_method_var = tk.StringVar(value=method_value)
-        ttk.Combobox(
-            chandra_frame,
-            textvariable=self.chandra_method_var,
-            values=("vllm", "hf"),
-            width=10,
-            state="readonly",
-        ).pack(anchor="w", pady=(0, 4))
-        ttk.Button(
-            chandra_frame,
-            text="Test Chantra OCR",
-            command=self.test_chandra_ocr_threaded,
-        ).pack(anchor="w", pady=(0, 2))
-        ttk.Label(
-            chandra_frame,
-            text=(
-                "Requires chandra-ocr plus a running vLLM endpoint or a GPU for HF mode."
-            ),
-            wraplength=360,
-            justify=tk.LEFT,
-        ).pack(anchor="w", pady=(2, 0))
 
         timing_frame = ttk.LabelFrame(general_tab, text="Timing & Typing")
         timing_frame.pack(fill=tk.X, pady=4)
@@ -1694,27 +2763,8 @@ class RDPApp(tk.Tk):
         nr.pack(anchor="w", pady=(4, 0))
         self.normalize_var = tk.BooleanVar(value=self.cfg.get("normalize_ocr", True))
         ttk.Checkbutton(
-            nr, text="Normalize OCR (O?0, S?5…)", variable=self.normalize_var
+            nr, text="Normalize OCR (O→0, S→5…)", variable=self.normalize_var
         ).pack(side=tk.LEFT)
-
-        back_row = ttk.Frame(ocr_options)
-        back_row.pack(anchor="w", pady=(4, 0))
-        ttk.Label(back_row, text="Primary OCR").pack(side=tk.LEFT)
-        ttk.Combobox(
-            back_row,
-            textvariable=self.ocr_primary_var,
-            values=("tesseract", "chandra"),
-            width=12,
-            state="readonly",
-        ).pack(side=tk.LEFT, padx=6)
-        ttk.Label(back_row, text="Secondary OCR").pack(side=tk.LEFT)
-        ttk.Combobox(
-            back_row,
-            textvariable=self.ocr_secondary_var,
-            values=("none", "tesseract", "chandra"),
-            width=12,
-            state="readonly",
-        ).pack(side=tk.LEFT, padx=6)
 
         ttk.Button(
             ocr_options, text="Test Parse (full region)", command=self.test_parse_full
@@ -1935,23 +2985,6 @@ class RDPApp(tk.Tk):
             f"{rel_box[0]:.3f}, {rel_box[1]:.3f}, {rel_box[2]:.3f}, {rel_box[3]:.3f}"
         )
         self.log_print(f"Result region set (relative): {rel_box}")
-        try:
-            preview = self._grab_region_color()
-            if preview:
-                self.show_preview(preview)
-        except Exception:
-            pass
-
-    def pick_chandra_region(self):
-        rb = self._two_click_box(
-            "Hover TOP-LEFT of the Chandra test area, then OK.",
-            "Hover BOTTOM-RIGHT of the Chandra test area, then OK.",
-        )
-        if rb:
-            self.cfg["chandra_region"] = rb
-            if hasattr(self, "chandra_region_var"):
-                self.chandra_region_var.set(", ".join(f"{v:.3f}" for v in rb))
-            self.log_print(f"[Chandra] Test region set: {rb}")
 
     def _two_click_box(self, msg1, msg2):
         if not self.current_rect:
@@ -1964,6 +2997,265 @@ class RDPApp(tk.Tk):
         left, top = min(x1, x2), min(y1, y2)
         width, height = abs(x2 - x1), abs(y2 - y1)
         return abs_to_rel(self.current_rect, abs_box=(left, top, width, height))
+
+    def _format_rel_box(self, box):
+        try:
+            l, t, w, h = [float(v) for v in box]
+        except Exception:
+            return ""
+        return f"{l:.3f}, {t:.3f}, {w:.3f}, {h:.3f}"
+
+    def _akten_ignore_tokens(self):
+        raw = self.cfg.get("akten_ignore_tokens", "") or ""
+        if not raw.strip():
+            return []
+        tokens = re.split(r"[;,]+", raw)
+        return [tok.strip().lower() for tok in tokens if tok and tok.strip()]
+
+    def _capture_akten_filter_text(self):
+        if not self.current_rect or not self._has("akten_document_filter_region"):
+            return ""
+        try:
+            rel_box = self._get("akten_document_filter_region")
+            upscale = (
+                self.upscale_var.get()
+                if hasattr(self, "upscale_var") and self.upscale_var.get()
+                else 3
+            )
+            img, _ = _grab_region_color_generic(self.current_rect, rel_box, upscale)
+        except Exception:
+            return ""
+        return self._ocr_text(img)
+
+    def _extract_akten_filter_info(self, prefix=""):
+        text = self._capture_akten_filter_text()
+        if not text:
+            self.log_print(f"{prefix}Document filter OCR returned no text.")
+            return None, ""
+        match = self._AKTEN_AZ_RE.search(text)
+        if match:
+            az = match.group(1).strip()
+            self.log_print(f"{prefix}Detected AZ '{az}'.")
+            return az, text
+        self.log_print(f"{prefix}No AZ pattern found in document filter text.")
+        return None, text
+
+    def _extract_akten_date_from_pdf(self, prefix=""):
+        if not self.current_rect or not self._has("pdf_text_region"):
+            self.log_print(f"{prefix}PDF text region is not configured.")
+            return None, ""
+        try:
+            rel_box = self._get("pdf_text_region")
+            upscale = (
+                self.upscale_var.get()
+                if hasattr(self, "upscale_var") and self.upscale_var.get()
+                else 3
+            )
+            img, _ = _grab_region_color_generic(self.current_rect, rel_box, upscale)
+        except Exception as exc:
+            self.log_print(f"{prefix}Unable to capture PDF text region: {exc}")
+            return None, ""
+        text = self._ocr_text(img)
+        if not text:
+            self.log_print(f"{prefix}PDF OCR returned no text.")
+            return None, ""
+        match = self._AKTEN_DATE_RE.search(text)
+        if match:
+            date_only = match.group(2).strip()
+            self.log_print(
+                f"{prefix}Found date '{date_only}' (raw '{match.group(0)}')."
+            )
+            return date_only, text
+        self.log_print(f"{prefix}No date pattern found in PDF text.")
+        return None, text
+
+    def test_akten_setup(self):
+        prefix = "[Akten Test] "
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+        except Exception as exc:
+            self.log_print(f"{prefix}Failed to sync config: {exc}")
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+
+        checks = [
+            ("Doc list region", bool(self._doclist_abs_rect())),
+            (
+                "Document filter region",
+                self._has("akten_document_filter_region"),
+            ),
+            ("PDF text region", self._has("pdf_text_region")),
+            (
+                "View button",
+                isinstance(self.cfg.get("doc_view_point"), (list, tuple)),
+            ),
+            (
+                "PDF close button",
+                isinstance(self.cfg.get("pdf_close_point"), (list, tuple)),
+            ),
+        ]
+        all_ok = True
+        for label, ok in checks:
+            self.log_print(f"{prefix}{label}: {'OK' if ok else 'MISSING'}")
+            all_ok = all_ok and ok
+        if not all_ok:
+            messagebox.showwarning(
+                "Akten Test",
+                "One or more Akten calibration steps are missing. Please configure them first.",
+            )
+            return
+
+        search_term = self.cfg.get("akten_search_term", "Aufforderungsschreiben")
+        self.clear_simple_log()
+        if not self._type_doclist_query(search_term, prefix=prefix):
+            self.log_print(f"{prefix}Unable to type search term '{search_term}'.")
+            return
+        try:
+            wait_after = float(self.cfg.get("post_search_wait", 1.2))
+        except Exception:
+            wait_after = 1.2
+        if wait_after > 0:
+            time.sleep(max(0.2, wait_after))
+        self._wait_for_doc_search_ready(prefix=prefix, reason="test setup")
+        self._wait_for_doclist_ready(prefix=prefix, reason="test setup")
+        az_value, raw = self._extract_akten_filter_info(prefix=prefix)
+        if az_value:
+            self.simple_log_print(f"Test AZ detected: {az_value}")
+        else:
+            self.simple_log_print("Test AZ not detected.")
+            if raw:
+                self.simple_log_print(raw)
+
+    def run_akten_threaded(self):
+        threading.Thread(target=self.run_akten, daemon=True).start()
+
+    def run_akten(self):
+        prefix = "[Akten] "
+        try:
+            self.pull_form_into_cfg()
+            save_cfg(self.cfg)
+            self.apply_paths_to_tesseract()
+        except Exception as exc:
+            self.log_print(f"{prefix}Setup warning: {exc}")
+        if not self.current_rect:
+            self.connect_rdp()
+            if not self.current_rect:
+                return
+        try:
+            Desktop(backend="uia").window(title_re=self.rdp_var.get()).set_focus()
+        except Exception:
+            pass
+
+        if not self._doclist_abs_rect():
+            self.log_print(f"{prefix}Doc list region is not configured.")
+            return
+        if not self._has("akten_document_filter_region"):
+            self.log_print(f"{prefix}Document filter region is not configured.")
+            return
+        if not self._has("pdf_text_region"):
+            self.log_print(f"{prefix}PDF text region is not configured.")
+            return
+        view_point = self.cfg.get("doc_view_point")
+        if not (isinstance(view_point, (list, tuple)) and len(view_point) == 2):
+            self.log_print(f"{prefix}View button point is not configured.")
+            return
+        close_point = self.cfg.get("pdf_close_point")
+        if not (isinstance(close_point, (list, tuple)) and len(close_point) == 2):
+            self.log_print(f"{prefix}PDF close button point is not configured.")
+            return
+
+        search_term = self.cfg.get("akten_search_term", "Aufforderungsschreiben")
+        ignore_tokens = self._akten_ignore_tokens()
+
+        if not self._type_doclist_query(search_term, prefix=prefix):
+            return
+        try:
+            wait_after = float(self.cfg.get("post_search_wait", 1.2))
+        except Exception:
+            wait_after = 1.2
+        if wait_after > 0:
+            time.sleep(max(0.2, wait_after))
+        self._wait_for_doc_search_ready(prefix=prefix, reason="after Akten search")
+        self._wait_for_doclist_ready(prefix=prefix, reason="after Akten search")
+
+        rows = self._ocr_doclist_rows_boxes()
+        if not rows:
+            self.log_print(f"{prefix}No documents matched '{search_term}'.")
+            return
+
+        self.clear_simple_log()
+        try:
+            doc_wait = float(self.cfg.get("doc_open_wait", 1.0))
+        except Exception:
+            doc_wait = 1.0
+        try:
+            per_row_wait = float(self.cfg.get("rechnungen_region_wait", 0.4))
+        except Exception:
+            per_row_wait = 0.4
+        per_row_wait = max(0.2, per_row_wait)
+        doc_wait = max(0.2, doc_wait)
+        captured = 0
+        opened = 0
+
+        for row_idx, (raw_text, _) in enumerate(rows):
+            row_label = (raw_text or "").strip()
+            row_lower = row_label.lower()
+            if ignore_tokens and any(tok in row_lower for tok in ignore_tokens):
+                self.log_print(
+                    f"{prefix}Skipping row {row_idx + 1} due to ignore token."
+                )
+                continue
+
+            if not self._click_doclist_row(row_idx):
+                self.log_print(
+                    f"{prefix}Unable to click doc list row {row_idx + 1}; stopping."
+                )
+                continue
+            time.sleep(per_row_wait)
+
+            az_value, _ = self._extract_akten_filter_info(prefix=prefix)
+            if az_value and ignore_tokens and any(
+                tok in az_value.lower() for tok in ignore_tokens
+            ):
+                self.log_print(
+                    f"{prefix}Skipping AZ '{az_value}' due to ignore token."
+                )
+                continue
+
+            if not self._click_view_button(prefix=prefix):
+                self.log_print(f"{prefix}View button click failed; aborting.")
+                break
+            opened += 1
+            extra_wait = max(
+                0.0, float(self.cfg.get("pdf_view_extra_wait", 0.0) or 0.0)
+            )
+            time.sleep(doc_wait + extra_wait)
+            self._wait_for_pdf_ready(prefix=prefix, reason="Akten PDF open")
+
+            date_value, _ = self._extract_akten_date_from_pdf(prefix=prefix)
+            az_display = az_value or "Unknown AZ"
+            if date_value:
+                captured += 1
+                self.simple_log_print(f"{az_display} -> {date_value}")
+            else:
+                self.simple_log_print(f"{az_display} -> (date not found)")
+
+            self._close_active_pdf(prefix=prefix)
+            time.sleep(0.4)
+
+        if opened == 0:
+            self.simple_log_print("Akten run finished without opening any documents.")
+        else:
+            self.log_print(
+                f"{prefix}Opened {opened} document(s); captured {captured} date(s)."
+            )
 
     def pick_doclist_region(self):
         rb = self._two_click_box(
@@ -2132,6 +3424,17 @@ class RDPApp(tk.Tk):
             self.pdf_close_var.set(f"{rel[0]:.3f}, {rel[1]:.3f}")
         self.log_print(f"PDF close button point set: {rel}")
 
+    def pick_akten_document_filter_region(self):
+        rb = self._two_click_box(
+            "Hover TOP-LEFT of the Document Filter text area, then press OK.",
+            "Hover BOTTOM-RIGHT of the Document Filter text area, then press OK.",
+        )
+        if rb:
+            self.cfg["akten_document_filter_region"] = rb
+            if hasattr(self, "akten_filter_var"):
+                self.akten_filter_var.set(self._format_rel_box(rb))
+            self.log_print(f"[Akten] Document filter region set: {rb}")
+
     def pick_amount_region(self):
         """Pick a sub-region INSIDE the current Result Region; saves it into the profile editor fields."""
         if not self.current_rect:
@@ -2174,26 +3477,6 @@ class RDPApp(tk.Tk):
         self.log_print(
             f"Picked Amount Sub-Region (relative to result_region): {', '.join(f'{v:.3f}' for v in sub_rel)}"
         )
-        # Update active profile if one is selected
-        prof = self._get_active_profile()
-        if prof is not None:
-            prof["sub_region"] = sub_rel
-        # Preview the selected sub-region so the user can verify it
-        try:
-            full_img = self._grab_region_color()
-            if full_img:
-                px_l = int(sub_rel[0] * full_img.width)
-                px_t = int(sub_rel[1] * full_img.height)
-                px_r = int((sub_rel[0] + sub_rel[2]) * full_img.width)
-                px_b = int((sub_rel[1] + sub_rel[3]) * full_img.height)
-                px_l = max(0, min(px_l, full_img.width - 1))
-                px_t = max(0, min(px_t, full_img.height - 1))
-                px_r = max(px_l + 1, min(full_img.width, px_r))
-                px_b = max(px_t + 1, min(full_img.height, px_b))
-                preview = full_img.crop((px_l, px_t, px_r, px_b))
-                self.show_preview(preview, wait_token=self._prepare_preview_wait())
-        except Exception:
-            pass
 
     def test_typing(self):
         try:
@@ -2207,7 +3490,9 @@ class RDPApp(tk.Tk):
             pyautogui.hotkey("ctrl", "a")
             pyautogui.press("backspace")
             txt = self.typing_test_var.get() or "TEST123"
-            pyautogui.typewrite(txt, interval=float(self.type_var.get() or 0.02))
+            self._type_exact_text(
+                txt, fallback_interval=float(self.type_var.get() or 0.02)
+            )
             pyautogui.press("enter")
             self.log_print(f"Typed test text: {txt}")
         except Exception as e:
@@ -2343,10 +3628,6 @@ class RDPApp(tk.Tk):
     def read_region_and_parse(self, use_profile=False):
         """OCR selected region (full or profile sub-region), parse lines, then extract amount with keyword preference."""
         crop = self._grab_region_color()
-        if self.cfg.get("auto_green"):
-            green_band = find_green_band(crop)
-            if green_band is not None:
-                crop = green_band
         keyword = self.keyword_var.get().strip()
         if use_profile and self.use_profile_var.get():
             prof = self._get_active_profile()
@@ -2355,32 +3636,16 @@ class RDPApp(tk.Tk):
                 keyword = prof.get("keyword", keyword) or keyword
 
         lang = self.lang_var.get().strip() or "deu+eng"
-        use_normalize = bool(self.normalize_var.get())
-        selected = self._selected_ocr_backends() or ["tesseract"]
-        last_output = ("", [], None)
-
-        for backend in selected:
-            if backend == "chandra":
-                parsed = self._parse_with_chandra(crop, keyword)
-            else:
-                parsed = self._parse_with_tesseract(
-                    crop, keyword, lang, normalize=use_normalize
-                )
-
-            if not parsed:
-                continue
-
-            full_text, normalized_lines, amount = parsed
-            if use_normalize and backend != "chandra":
-                full_text = "\n".join(t for _, t in normalized_lines)
-            last_output = (full_text, normalized_lines, amount)
-            if amount:
-                self.log_print(
-                    f"[OCR] {backend.title()} backend extracted amount {amount}."
-                )
-                return full_text, crop, normalized_lines, amount
-
-        full_text, normalized_lines, amount = last_output
+        df = do_ocr_data(crop, lang=lang, psm=6)
+        lines = lines_from_tsv(df)
+        simple_lines = [(y, text) for _, y, _, _, text in lines]
+        full_text = "\n".join(t for _, t in simple_lines)
+        if self.normalize_var.get():
+            normalized_lines = [(y, normalize_line_soft(t)) for y, t in simple_lines]
+            full_text = "\n".join(t for _, t in normalized_lines)
+        else:
+            normalized_lines = simple_lines
+        amount, line = extract_amount_from_lines(normalized_lines, keyword=keyword)
         return full_text, crop, normalized_lines, amount
 
     # ---------- Batch ----------
@@ -2442,7 +3707,9 @@ class RDPApp(tk.Tk):
                 pyautogui.click(x, y)
                 pyautogui.hotkey("ctrl", "a")
                 pyautogui.press("backspace")
-                pyautogui.typewrite(q, interval=float(self.cfg["type_delay"]))
+                self._type_exact_text(
+                    q, fallback_interval=float(self.cfg.get("type_delay", 0.02))
+                )
                 pyautogui.press("enter")
                 time.sleep(float(self.cfg["post_search_wait"]))
 
@@ -2460,7 +3727,7 @@ class RDPApp(tk.Tk):
                     (t for _, t in lines if amount and amount in t), ""
                 )
                 results.append(rec)
-                self.log_print(f"[{len(results)}/{total}] {q} ? {amount or '(none)'}")
+                self.log_print(f"[{len(results)}/{total}] {q} → {amount or '(none)'}")
 
             out = pd.DataFrame(results)
             out.to_csv(self.cfg["results_csv"], index=False, encoding="utf-8-sig")
@@ -2811,10 +4078,10 @@ class RDPApp(tk.Tk):
                         }
                     )
                     self.log_print(
-                        f"[Log Extract] {display_label} ? {amount} ({section or 'section unknown'})"
+                        f"[Log Extract] {display_label} → {amount} ({section or 'section unknown'})"
                     )
                 else:
-                    self.log_print(f"[Log Extract] {display_label} ? (none)")
+                    self.log_print(f"[Log Extract] {display_label} → (none)")
 
             if results and output_csv:
                 try:
@@ -3827,7 +5094,7 @@ class RDPApp(tk.Tk):
             self.log_print(f"{prefix}-Received GG: {gg_amt}")
             reason = summary.get("gg_missing_reason")
             if reason:
-                self.log_print(f"{prefix}  ? Reason: {reason}.")
+                self.log_print(f"{prefix}  ↳ Reason: {reason}.")
 
     def _build_rechnungen_result_row(self, aktenzeichen, summary):
         if not summary:
@@ -4162,7 +5429,9 @@ class RDPApp(tk.Tk):
         pyautogui.click(sx, sy)
         pyautogui.hotkey("ctrl", "a")
         pyautogui.press("backspace")
-        pyautogui.typewrite(query or "", interval=float(self.type_var.get() or 0.02))
+        self._type_exact_text(
+            query or "", fallback_interval=float(self.type_var.get() or 0.02)
+        )
         if press_enter:
             self.log_print(f"{prefix}Pressing Enter to run PDF search.")
             pyautogui.press("enter")
@@ -4232,7 +5501,9 @@ class RDPApp(tk.Tk):
         pyautogui.click(sx, sy)
         pyautogui.hotkey("ctrl", "a")
         pyautogui.press("backspace")
-        pyautogui.typewrite(query or "", interval=float(self.type_var.get() or 0.02))
+        self._type_exact_text(
+            query or "", fallback_interval=float(self.type_var.get() or 0.02)
+        )
         if press_enter:
             self.log_print(f"{prefix}Pressing Enter after typing query.")
             pyautogui.press("enter")
@@ -4574,7 +5845,7 @@ class RDPApp(tk.Tk):
                     prefix=prefix,
                 )
                 preview = ", ".join(
-                    f"{m['token'] or 'any'} ? {m['raw']}" for m in ordered[:3]
+                    f"{m['token'] or 'any'} → {m['raw']}" for m in ordered[:3]
                 )
                 self.log_print(
                     f"{prefix}Selecting {tag} match: {first['raw']} | candidates: {preview}"
@@ -4615,7 +5886,7 @@ class RDPApp(tk.Tk):
                 results.append(rec)
                 self.simple_log_print(f"{aktenzeichen}: {amount or '(none)'}")
                 self.log_print(
-                    f"{prefix}{aktenzeichen} / {first['norm']} ? {amount or '(none)'}"
+                    f"{prefix}{aktenzeichen} / {first['norm']} → {amount or '(none)'}"
                 )
 
                 self._close_active_pdf(prefix=prefix)
@@ -4720,7 +5991,7 @@ class RDPApp(tk.Tk):
                 )
                 preview = debug_rows[:5] or [(raw, "") for *_, raw in lines[:5]]
                 for raw, reason in preview:
-                    desc = f"  {reason or 'OCR'} ? {raw}"
+                    desc = f"  {reason or 'OCR'} → {raw}"
                     self.log_print(desc)
                 self.log_print(
                     "[Test] No rows matched the include tokens after typing 'Streitwert'."
@@ -5008,7 +6279,7 @@ class RDPApp(tk.Tk):
             filename = f"{timestamp}_{safe}.log"
             path = os.path.join(LOG_DIR, filename)
             self._ocr_log_paths[log_label] = path
-            info = f"{prefix}OCR log file for '{log_label}' ? {path}"
+            info = f"{prefix}OCR log file for '{log_label}' → {path}"
             self.log_print(info.strip())
         path = self._ocr_log_paths.get(log_label)
         if not path:
@@ -5089,177 +6360,6 @@ class RDPApp(tk.Tk):
                 continue
         return False
 
-    def _selected_ocr_backends(self):
-        def _normalize(value, default):
-            v = (value or "").strip().lower()
-            return v or default
-
-        primary = _normalize(self.cfg.get("ocr_primary"), "tesseract")
-        secondary = _normalize(self.cfg.get("ocr_secondary"), "none")
-
-        if hasattr(self, "ocr_primary_var"):
-            primary = _normalize(self.ocr_primary_var.get(), primary)
-        if hasattr(self, "ocr_secondary_var"):
-            secondary = _normalize(self.ocr_secondary_var.get(), secondary)
-
-        backends = []
-        if primary in ("tesseract", "chandra"):
-            backends.append(primary)
-        else:
-            backends.append("tesseract")
-        if secondary in ("tesseract", "chandra") and secondary not in backends:
-            backends.append(secondary)
-        return backends
-
-    def _get_chandra_model(self, method: str):
-        if not _HAS_CHANDRA:
-            return None
-        method = (method or "vllm").strip().lower()
-        if method not in ("vllm", "hf"):
-            method = "vllm"
-        if method == "hf":
-            _ensure_chandra_hf_cpu()
-        cached = self._chandra_models.get(method)
-        if cached:
-            return cached
-        try:
-            self.log_print(f"[Chandra] Loading model (method={method.upper()}) ...")
-            model = InferenceManager(method=method)
-        except Exception as exc:
-            self.log_print(f"[Chandra] Failed to load model: {exc}")
-            messagebox.showerror(
-                "Chandra OCR",
-                f"Failed to load Chandra model for method '{method}':\n{exc}",
-            )
-            return None
-        self._chandra_models[method] = model
-        return model
-
-    def _capture_chandra_region(self):
-        if not self.current_rect:
-            self.connect_rdp()
-            if not self.current_rect:
-                self.log_print("[Chandra] No active RDP window available.")
-                return None, None
-        if not self._has("chandra_region"):
-            self.log_print("[Chandra] Test region not configured.")
-            return None, None
-        try:
-            x, y, w, h = rel_to_abs(self.current_rect, self.cfg["chandra_region"])
-        except Exception as exc:
-            self.log_print(f"[Chandra] Invalid region: {exc}")
-            return None, None
-        if w <= 1 or h <= 1:
-            self.log_print("[Chandra] Region width/height must be greater than zero.")
-            return None, None
-        img = self._grab_region_color(
-            x, y, w, h, upscale_x=self.upscale_var.get()
-        )
-        return img, (x, y, w, h)
-
-    def test_chandra_ocr_threaded(self):
-        threading.Thread(target=self.test_chandra_ocr, daemon=True).start()
-
-    def test_chandra_ocr(self):
-        prefix = "[Chandra] "
-        if not _HAS_CHANDRA:
-            messagebox.showerror(
-                "Chandra OCR",
-                "Package 'chandra-ocr' is not installed. Please run 'uv pip install chandra-ocr'.",
-            )
-            return
-        try:
-            self.pull_form_into_cfg()
-            save_cfg(self.cfg)
-        except Exception:
-            pass
-        img, rect = self._capture_chandra_region()
-        if img is None:
-            messagebox.showwarning(
-                "Chandra OCR",
-                "Unable to capture the Chandra test region. Set the region and ensure the RDP window is connected.",
-            )
-            return
-        self.show_preview(img)
-
-        parsed = self._parse_with_chandra(img, self.keyword_var.get().strip())
-        if not parsed:
-            messagebox.showerror(
-                "Chandra OCR",
-                "Failed to execute Chandra OCR.",
-            )
-            return
-
-        full_text, _lines, amount = parsed
-        snippet = full_text if len(full_text) <= 800 else full_text[:800] + " ..."
-        self.log_print(
-            f"{prefix}Markdown output ({len(full_text)} chars): {snippet or '(empty)'}"
-        )
-        self.log_print(f"{prefix}Detected amount: {amount or '(none)'}")
-        self.simple_log_print(f"Chandra OCR: {snippet or '(empty)'}")
-
-    def _run_chandra_on_image(self, img):
-        if not _HAS_CHANDRA:
-            self.log_print("[Chandra] Package chandra-ocr is not installed.")
-            return None
-        method = (self.cfg.get("chandra_method") or "vllm").strip().lower()
-        model = self._get_chandra_model(method)
-        if not model:
-            return None
-        self.log_print(f"[Chandra] Inference via {method.upper()} backend.")
-        try:
-            batch = [BatchInputItem(image=img, prompt_type="ocr_layout")]
-            results = model.generate(
-                batch,
-                include_images=False,
-                include_headers_footers=False,
-            )
-        except Exception as exc:
-            self.log_print(f"[Chandra] OCR failed: {exc}")
-            return None
-        if not results:
-            return None
-        result = results[0]
-        if result.error:
-            self.log_print("[Chandra] Model reported an error for this capture.")
-            return None
-
-        return result
-
-    def _parse_with_chandra(self, img, keyword):
-        result = self._run_chandra_on_image(img)
-        if not result:
-            return None
-        text = (result.markdown or result.raw or "").strip()
-        simple_lines = []
-        for idx, line in enumerate(text.splitlines()):
-            token = line.strip()
-            if token:
-                simple_lines.append((idx * 12, token))
-        normalized_lines = [
-            (y, normalize_line_soft(t)) for y, t in simple_lines if t
-        ]
-        amount = None
-        if normalized_lines:
-            amount, _ = extract_amount_from_lines(normalized_lines, keyword=keyword)
-        return "\n".join(t for _, t in simple_lines), normalized_lines, amount
-
-    def _parse_with_tesseract(self, img, keyword, lang, normalize=True):
-        df = do_ocr_data(img, lang=lang, psm=6)
-        lines = lines_from_tsv(df)
-        if not lines:
-            return "", [], None
-        simple_lines = [(y, text) for _, y, _, _, text in lines if text]
-        if normalize:
-            normalized_lines = [(y, normalize_line_soft(t)) for y, t in simple_lines]
-        else:
-            normalized_lines = simple_lines
-        full_text = "\n".join(t for _, t in normalized_lines)
-        amount = None
-        if normalized_lines:
-            amount, _ = extract_amount_from_lines(normalized_lines, keyword=keyword)
-        return full_text, normalized_lines, amount
-
     def pull_form_into_cfg(self):
         self.cfg["rdp_title_regex"] = self.rdp_var.get().strip()
         self.cfg["excel_path"] = self.xls_var.get().strip()
@@ -5294,15 +6394,11 @@ class RDPApp(tk.Tk):
         self.cfg["use_full_region_parse"] = bool(self.fullparse_var.get())
         self.cfg["keyword"] = self.keyword_var.get().strip() or "Honorar"
         self.cfg["normalize_ocr"] = bool(self.normalize_var.get())
-        self.cfg["ocr_primary"] = (
-            (self.ocr_primary_var.get() if hasattr(self, "ocr_primary_var") else "")
-            or "tesseract"
-        ).strip().lower()
-        secondary_value = (
-            (self.ocr_secondary_var.get() if hasattr(self, "ocr_secondary_var") else "")
-            or "none"
-        ).strip().lower()
-        self.cfg["ocr_secondary"] = secondary_value or "none"
+        if hasattr(self, "akten_search_var"):
+            search = self.akten_search_var.get().strip()
+            self.cfg["akten_search_term"] = search or "Aufforderungsschreiben"
+        if hasattr(self, "akten_ignore_var"):
+            self.cfg["akten_ignore_tokens"] = self.akten_ignore_var.get().strip()
 
         # Profiles / selection
         self.cfg["use_amount_profile"] = bool(self.use_profile_var.get())
@@ -5387,11 +6483,6 @@ class RDPApp(tk.Tk):
                 "log_extract_results_csv", "streitwert_log_extract.csv"
             )
             self.cfg["log_extract_results_csv"] = log_csv or default_csv
-        if hasattr(self, "chandra_method_var"):
-            method = (self.chandra_method_var.get() or "vllm").strip().lower()
-            if method not in ("vllm", "hf"):
-                method = "vllm"
-            self.cfg["chandra_method"] = method
         self.cfg["streitwert_overlay_skip_waits"] = bool(self.skip_waits_var.get())
         if hasattr(self, "pdf_view_wait_var"):
             try:
@@ -5422,25 +6513,18 @@ class RDPApp(tk.Tk):
             self.fullparse_var.set(self.cfg.get("use_full_region_parse", True))
             self.keyword_var.set(self.cfg.get("keyword", "Honorar"))
             self.normalize_var.set(self.cfg.get("normalize_ocr", True))
-            if hasattr(self, "ocr_primary_var"):
-                self.ocr_primary_var.set(self.cfg.get("ocr_primary", "tesseract"))
-            if hasattr(self, "ocr_secondary_var"):
-                self.ocr_secondary_var.set(self.cfg.get("ocr_secondary", "none"))
-            if hasattr(self, "chandra_method_var"):
-                method = (self.cfg.get("chandra_method") or "vllm").strip().lower()
-                if method not in ("vllm", "hf"):
-                    method = "vllm"
-                self.chandra_method_var.set(method)
-            if hasattr(self, "chandra_region_var"):
-                box = self.cfg.get("chandra_region")
-                if (
-                    isinstance(box, (list, tuple))
-                    and len(box) == 4
-                    and all(isinstance(v, (int, float)) for v in box)
-                ):
-                    self.chandra_region_var.set(", ".join(f"{v:.3f}" for v in box))
-                else:
-                    self.chandra_region_var.set("(not set)")
+            if hasattr(self, "akten_search_var"):
+                self.akten_search_var.set(
+                    self.cfg.get("akten_search_term", "Aufforderungsschreiben")
+                )
+            if hasattr(self, "akten_ignore_var"):
+                self.akten_ignore_var.set(self.cfg.get("akten_ignore_tokens", ""))
+            if hasattr(self, "akten_filter_var"):
+                self.akten_filter_var.set(
+                    self._format_rel_box(
+                        self.cfg.get("akten_document_filter_region", [0, 0, 0, 0])
+                    )
+                )
             self.includes_var.set(self.cfg.get("includes", "Urt,SWB,SW"))
             self.excludes_var.set(self.cfg.get("excludes", "SaM,KLE"))
             self.exclude_k_var.set(self.cfg.get("exclude_prefix_k", True))
@@ -5691,7 +6775,27 @@ class RDPApp(tk.Tk):
                 else 0.008
             ),
         )
-        pyautogui.typewrite(s, interval=delay)
+        self._type_exact_text(s, fallback_interval=delay)
+
+    def _type_exact_text(self, text, *, fallback_interval=0.02):
+        """Type characters exactly using system keyboard layout."""
+        s = "" if text is None else str(text)
+        pause = max(fallback_interval, 0.001)
+        try:
+            send_keys(
+                s,
+                pause=pause,
+                with_spaces=True,
+                with_tabs=True,
+                with_newlines=True,
+                turn_off_numlock=False,
+                vk_packet=True,
+            )
+        except Exception as exc:
+            self.log_print(
+                f"[Type] send_keys failed ({exc}); falling back to simulated typing."
+            )
+            pyautogui.typewrite(s, interval=fallback_interval)
 
     def _fees_overlay_wait(self, what):
         """Overlay-preferring waits like Streitwert."""
@@ -6042,7 +7146,7 @@ class RDPApp(tk.Tk):
         # Instance detection first (ensures we know how many KFBs to open)
         inst_info = self.detect_instance(prefix=prefix) or {}
         inst = inst_info.get("instance") or 1
-        self.log_print(f"{prefix}Instance ? open first {inst} KFB file(s).")
+        self.log_print(f"{prefix}Instance → open first {inst} KFB file(s).")
 
         # Put KFB into file-search (once)
         self._click_file_search_and_type_kfb()
@@ -6062,7 +7166,7 @@ class RDPApp(tk.Tk):
         amounts = [None, None, None]  # inst1, inst2, inst3
         for j in range(N):
             row_idx, line = kfb_rows[j]
-            self.log_print(f"{prefix}Opening KFB {j+1}/{N}: row {row_idx} ? {line}")
+            self.log_print(f"{prefix}Opening KFB {j+1}/{N}: row {row_idx} → {line}")
             amt = self._fees_open_and_extract_one(row_idx, prefix=prefix)
             if amt:
                 self.log_print(f"{prefix}Amount: {amt}")
@@ -6094,7 +7198,7 @@ class RDPApp(tk.Tk):
             if write_header:
                 w.writeheader()
             w.writerow(row)
-        self.log_print(f"{prefix}Saved ? {path}")
+        self.log_print(f"{prefix}Saved → {path}")
 
     def test_fees(self):
         prefix = "[Fees Test] "
@@ -6271,5 +7375,3 @@ class RDPApp(tk.Tk):
 if __name__ == "__main__":
     app = RDPApp()
     app.mainloop()
-
-

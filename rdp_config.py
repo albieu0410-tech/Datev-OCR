@@ -40,12 +40,17 @@ DEFAULTS = {
     "use_full_region_parse": True,
     "keyword": "Honorar",
     "normalize_ocr": True,
+    "ocr_primary": "tesseract",
+    "ocr_secondary": "none",
     # -------- NEW: Amount Region Profiles --------
     # Each profile is stored relative to "result_region"
     # { "name": str, "keyword": str, "sub_region": [l, t, w, h] }
     "amount_profiles": [],  # list of dicts
     "active_amount_profile": "",  # profile name
     "use_amount_profile": False,  # if True, restrict OCR to profile sub-region
+    # --- Chandra OCR integration ---
+    "chandra_region": [0.15, 0.20, 0.80, 0.35],
+    "chandra_method": "vllm",
     # --- Streitwert workflow (NEW) ---
     "doclist_region": [0.10, 0.24, 0.78, 0.50],  # list/table area with documents
     "pdf_search_point": [0.55, 0.10],  # the PDF viewer's search field
